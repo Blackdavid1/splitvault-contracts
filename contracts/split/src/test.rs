@@ -4257,7 +4257,7 @@ fn test_114_delegate_pay_refund_returns_to_delegate() {
     env.ledger().set_timestamp(1_000);
 
     let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 2_000);
-    c.authorise_delegate(&beneficiary, &delegate);
+    c.authorise_delegate(&beneficiary, &delegate, &40, &2_000);
     c.delegate_pay(&delegate, &beneficiary, &id, &40_i128);
     assert_eq!(tk.balance(&delegate), 160);
 
@@ -6027,7 +6027,7 @@ fn test_121_simulate_release_rejects_released_invoice() {
     env.ledger().set_timestamp(1_000);
 
     let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
-    c.pay(&payer, &id, &100);
+    c.pay(&payer, &id, &100, &0, &false, &false, &None);
     assert_eq!(
         c.try_simulate_release(&id).unwrap_err(),
         Ok(ContractError::InvalidStatus.into())
@@ -10060,7 +10060,7 @@ fn issue_cert_hash_for_fresh_invoice() -> (u64, [u8; 32]) {
     env.ledger().set_timestamp(1_000);
 
     let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
-    c.pay(&payer, &id, &100);
+    c.pay(&payer, &id, &100, &0, &false, &false, &None);
     let cert = c.issue_certificate(&id);
     (id, cert.cert_hash.to_array())
 }
