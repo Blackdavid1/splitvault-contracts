@@ -3,6 +3,10 @@ name: Deploy to Testnet
 on:
   workflow_dispatch:
 
+concurrency:
+  group: deploy-testnet-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -10,9 +14,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
-          targets: wasm32-unknown-unknown
+          toolchain: 1.100.0
+          targets: wasm32v1-none
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -30,7 +35,9 @@ jobs:
         run: cargo install --locked stellar-cli
 
       - name: Build contract (release)
-        run: cargo build --target wasm32-unknown-unknown --release --package split
+        env:
+          SOROBAN_SDK_BUILD_SYSTEM_SUPPORTS_SPEC_SHAKING_V2: 0
+        run: cargo build --locked --target wasm32v1-none --release --package split
 
       - name: Configure testnet identity
         run: stellar keys generate deployer --network testnet
@@ -45,7 +52,7 @@ jobs:
       - name: Deploy contract
         run: |
           stellar contract deploy \
-            --wasm target/wasm32-unknown-unknown/release/split.wasm \
+            --wasm target/wasm32v1-none/release/split.wasm \
             --source deployer \
             --network testnet \
             --rpc-url https://soroban-testnet.stellar.org \
