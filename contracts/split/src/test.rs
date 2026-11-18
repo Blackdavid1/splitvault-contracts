@@ -10050,10 +10050,13 @@ fn test_withdraw_contribution_no_double_refund() {
 // Issue #120: certificate hash commits to recipients, tokens and contract
 // ---------------------------------------------------------------------------
 
-fn issue_cert_hash_for_fresh_invoice() -> (u64, [u8; 32]) {
+fn issue_cert_hash_for_fresh_invoice(recipient_offset: usize) -> (u64, [u8; 32]) {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
     let creator = Address::generate(&env);
+    for _ in 0..recipient_offset {
+        Address::generate(&env);
+    }
     let recipient = Address::generate(&env);
     let payer = Address::generate(&env);
     StellarAssetClient::new(&env, &token_id).mint(&payer, &100);
@@ -10067,10 +10070,9 @@ fn issue_cert_hash_for_fresh_invoice() -> (u64, [u8; 32]) {
 
 #[test]
 fn test_120_certificate_hash_differs_by_recipient() {
-    // Identical invoice id, total and release timestamp; different
-    // recipients, tokens and contract instance.
-    let (id_a, hash_a) = issue_cert_hash_for_fresh_invoice();
-    let (id_b, hash_b) = issue_cert_hash_for_fresh_invoice();
+    // Identical invoice ID, total, and release timestamp with different recipients.
+    let (id_a, hash_a) = issue_cert_hash_for_fresh_invoice(0);
+    let (id_b, hash_b) = issue_cert_hash_for_fresh_invoice(1);
     assert_eq!(id_a, id_b);
     assert_ne!(hash_a, hash_b);
 }
