@@ -73,3 +73,14 @@ jobs:
 
       - name: Fuzz sequence (60s)
         run: cargo +nightly-2026-11-12 fuzz run fuzz_sequence -- -max_total_time=60
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.100.0
+          components: clippy
+      - name: Lint workspace packages
+        run: cargo clippy --workspace --locked -- -D clippy::dbg_macro
