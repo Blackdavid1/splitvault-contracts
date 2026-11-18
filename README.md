@@ -4,7 +4,7 @@
 </div>
 
 ![Rust](https://img.shields.io/badge/Rust-1.84+-orange?logo=rust)
-![Soroban SDK](https://img.shields.io/badge/soroban--sdk-22.0.0-blueviolet)
+![Soroban SDK](https://img.shields.io/badge/soroban--sdk-28-blueviolet)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![CI](https://github.com/splitvault/split-contracts/actions/workflows/test.yml/badge.svg)
 
@@ -21,7 +21,7 @@ SplitVault lets users create on-chain invoices where multiple payers each owe a 
 | Layer | Technology |
 |-------|-----------|
 | Language | Rust 1.84+ |
-| Smart Contract SDK | soroban-sdk 22.0.0 |
+| Smart Contract SDK | soroban-sdk 28 |
 | Test Runner | `cargo test` |
 | Deploy Tool | stellar-cli |
 | Network | Stellar Testnet / Mainnet |
