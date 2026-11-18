@@ -6,7 +6,9 @@
 
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, symbol_short, xdr::ToXdr, Address, Bytes, BytesN, Env, Symbol, Val, Vec};
+use soroban_sdk::{
+    contract, contractimpl, symbol_short, xdr::ToXdr, Address, Bytes, BytesN, Env, Symbol, Val, Vec,
+};
 
 // ---------------------------------------------------------------------------
 // Storage keys
@@ -335,7 +337,10 @@ impl SplitFactory {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{testutils::{Address as _, Events as _}, BytesN, Env, TryFromVal, Val, Vec};
+    use soroban_sdk::{
+        testutils::{Address as _, Events as _},
+        BytesN, Env, TryFromVal, Val, Vec,
+    };
 
     /// Minimal valid Soroban WASM stub (soroban-sdk doctest fixture).
     const STUB_WASM: &[u8] = include_bytes!("../../../tests/fixtures/stub_contract.wasm");
@@ -358,12 +363,7 @@ mod test {
         let salt = BytesN::from_array(&env, &[1u8; 32]);
         let init_args = Vec::<Val>::new(&env);
 
-        let addr = factory_client.deploy_invoice_contract(
-            &creator,
-            &wasm_hash,
-            &salt,
-            &init_args,
-        );
+        let addr = factory_client.deploy_invoice_contract(&creator, &wasm_hash, &salt, &init_args);
 
         let deployments = factory_client.get_deployments(&creator);
         assert_eq!(deployments.len(), 1);
@@ -388,20 +388,12 @@ mod test {
         let init_args = Vec::<Val>::new(&env);
 
         let salt1 = BytesN::from_array(&env, &[1u8; 32]);
-        let addr1 = factory_client.deploy_invoice_contract(
-            &creator,
-            &wasm_hash,
-            &salt1,
-            &init_args,
-        );
+        let addr1 =
+            factory_client.deploy_invoice_contract(&creator, &wasm_hash, &salt1, &init_args);
 
         let salt2 = BytesN::from_array(&env, &[2u8; 32]);
-        let addr2 = factory_client.deploy_invoice_contract(
-            &creator,
-            &wasm_hash,
-            &salt2,
-            &init_args,
-        );
+        let addr2 =
+            factory_client.deploy_invoice_contract(&creator, &wasm_hash, &salt2, &init_args);
 
         assert_ne!(addr1, addr2);
 
@@ -453,10 +445,12 @@ mod test {
         let salt = BytesN::from_array(&env, &[1u8; 32]);
 
         let creator1 = Address::generate(&env);
-        let addr1 = factory_client.deploy_invoice_contract(&creator1, &wasm_hash, &salt, &init_args);
+        let addr1 =
+            factory_client.deploy_invoice_contract(&creator1, &wasm_hash, &salt, &init_args);
 
         let creator2 = Address::generate(&env);
-        let addr2 = factory_client.deploy_invoice_contract(&creator2, &wasm_hash, &salt, &init_args);
+        let addr2 =
+            factory_client.deploy_invoice_contract(&creator2, &wasm_hash, &salt, &init_args);
 
         assert_ne!(addr1, addr2);
     }
@@ -495,7 +489,9 @@ mod test {
             }
             // topics: (factory, deployed, creator)
             if topics.len() >= 3 {
-                if let Ok(t0) = <Symbol as TryFromVal<Env, Val>>::try_from_val(&env, &topics.get_unchecked(0)) {
+                if let Ok(t0) =
+                    <Symbol as TryFromVal<Env, Val>>::try_from_val(&env, &topics.get_unchecked(0))
+                {
                     if t0 == symbol_short!("factory") {
                         found = true;
                         break;
