@@ -37,6 +37,17 @@ jobs:
       - name: Storage key snapshot test
         run: cargo test --locked -p split storage_snapshot
 
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.100.0
+          components: rustfmt
+      - name: Check workspace formatting
+        run: cargo fmt --all -- --check
+
   fuzz:
     runs-on: ubuntu-latest
     steps:
