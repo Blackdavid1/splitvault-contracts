@@ -10019,8 +10019,16 @@ fn test_withdraw_contribution_no_double_refund() {
 
     env.ledger().set_timestamp(1_000);
 
-    // Invoice requires 500 tokens, deadline is 9_999.
-    let id = make_invoice(&env, &c, &creator, &recipient, 500, &token_id, 9_999);
+    let mut options = default_options(&env);
+    options.allow_early_withdrawal = true;
+    let id = c.create_invoice(
+        &creator,
+        &soroban_sdk::vec![&env, recipient],
+        &soroban_sdk::vec![&env, 500_i128],
+        &token_id,
+        &9_999,
+        &options,
+    );
 
     // Payer contributes 300.
     c.pay(&payer, &id, &300_i128, &0_u64, &false, &false, &None);

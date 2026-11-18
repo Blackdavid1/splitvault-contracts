@@ -8844,7 +8844,6 @@ impl SplitContract {
     /// If an approver is set, requires the invoice to be approved first (issue #25).
     pub fn release_invoice(env: Env, caller: Address, invoice_id: u64, preimage: Option<Bytes>) {
         // --- Reentrancy guard (issue #451-reentrancy) ---
-        // Uses temporary storage so the lock is never persisted across transactions.
         let re_key = reentrancy_lock_key();
         if env.storage().temporary().has(&re_key) {
             panic_with_error!(env, ContractError::ReentrantCall);
@@ -8852,6 +8851,7 @@ impl SplitContract {
         env.storage().temporary().set(&re_key, &true);
         // ------------------------------------------------
         Self::_release_invoice_inner(&env, caller, invoice_id, preimage);
+        env.storage().temporary().remove(&re_key);
     }
 
     #[allow(unreachable_code)]
