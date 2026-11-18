@@ -3,7 +3,7 @@
   <h1>split-contracts</h1>
 </div>
 
-![Rust](https://img.shields.io/badge/Rust-1.84+-orange?logo=rust)
+![Rust](https://img.shields.io/badge/Rust-1.93+-orange?logo=rust)
 ![Soroban SDK](https://img.shields.io/badge/soroban--sdk-28-blueviolet)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![CI](https://github.com/splitvault/split-contracts/actions/workflows/test.yml/badge.svg)
@@ -20,7 +20,7 @@ SplitVault lets users create on-chain invoices where multiple payers each owe a 
 
 | Layer | Technology |
 |-------|-----------|
-| Language | Rust 1.84+ |
+| Language | Rust 1.93+ |
 | Smart Contract SDK | soroban-sdk 28 |
 | Test Runner | `cargo test` |
 | Deploy Tool | stellar-cli |
@@ -30,7 +30,7 @@ SplitVault lets users create on-chain invoices where multiple payers each owe a 
 
 ### Prerequisites
 
-- Rust 1.84+ with `wasm32-unknown-unknown` target
+- Rust 1.93+ with `wasm32v1-none` target
 - stellar-cli
 
 ```bash
@@ -38,10 +38,10 @@ SplitVault lets users create on-chain invoices where multiple payers each owe a 
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Add WASM target
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32v1-none
 
 # Install stellar-cli
-cargo install --locked stellar-cli --features opt
+cargo install --locked --version 28.1.0 stellar-cli
 ```
 
 ### Clone & Build
@@ -49,7 +49,7 @@ cargo install --locked stellar-cli --features opt
 ```bash
 git clone https://github.com/splitvault/split-contracts.git
 cd split-contracts
-cargo build --target wasm32-unknown-unknown --release
+stellar contract build
 ```
 
 ### Run Tests
@@ -57,6 +57,30 @@ cargo build --target wasm32-unknown-unknown --release
 ```bash
 cargo test --workspace
 ```
+
+### Fuzzing
+
+Run these commands from the repository root with the nightly in
+`rust-toolchain.toml`. Keep the standalone `fuzz/Cargo.lock` in sync with
+dependency changes. CI uses it for the cache key, checks dependency resolution
+with `--locked`, and verifies that fuzzing leaves the file unchanged.
+
+```bash
+cargo install --locked --version 0.13.2 cargo-fuzz
+cargo check --locked --manifest-path fuzz/Cargo.toml
+cargo fuzz run fuzz_create_invoice -- -max_total_time=60
+```
+
+### Testnet Deployment
+
+The manually triggered **Deploy to Testnet** workflow uses Stellar CLI
+`28.1.0` and logs the installed version. After a successful deployment,
+download `testnet-deployment.json` from the run's **testnet-deployment**
+artifact. The fields are `network`, `contract_id`, `commit_sha`, and
+`wasm_sha256` (the SHA-256 digest of the deployed WASM file).
+
+With `jq` installed, run the offline manifest fixture with
+`bash scripts/test-testnet-deployment-manifest.sh`.
 
 ## Contract Function Reference
 

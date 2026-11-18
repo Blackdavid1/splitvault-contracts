@@ -6,13 +6,15 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32v1-none
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -27,10 +29,12 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config
 
       - name: Install stellar-cli
-        run: cargo install --locked stellar-cli
+        run: |
+          cargo install --locked --version 28.1.0 stellar-cli
+          stellar --version
 
       - name: Build contract (release)
-        run: cargo build --target wasm32-unknown-unknown --release --package split
+        run: stellar contract build --package split
 
       - name: Configure testnet identity
         run: stellar keys generate deployer --network testnet
@@ -43,10 +47,20 @@ jobs:
           echo "Account funded."
 
       - name: Deploy contract
+        shell: bash
         run: |
-          stellar contract deploy \
-            --wasm target/wasm32-unknown-unknown/release/split.wasm \
+          wasm=target/wasm32v1-none/release/split.wasm
+          contract_id=$(stellar contract deploy \
+            --wasm "$wasm" \
             --source deployer \
-            --network testnet \
-            --rpc-url https://soroban-testnet.stellar.org \
-            --network-passphrase "Test SDF Network ; September 2015"
+            --network testnet)
+          echo "Deployed contract $contract_id"
+          bash scripts/testnet-deployment-manifest.sh "$contract_id" "$GITHUB_SHA" "$wasm" \
+            > testnet-deployment.json
+
+      - name: Upload deployment manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: testnet-deployment
+          path: testnet-deployment.json
+          if-no-files-found: error

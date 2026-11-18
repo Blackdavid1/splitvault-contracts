@@ -19,7 +19,7 @@ jobs:
       - name: Install pinned nightly Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2024-08-01
+          toolchain: nightly-2026-11-10
           targets: wasm32v1-none
 
       - name: Cache cargo registry
@@ -30,6 +30,9 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Verify testnet deployment manifest fixture
+        run: bash scripts/test-testnet-deployment-manifest.sh
 
       - name: Run tests
         run: cargo test --workspace
@@ -45,7 +48,7 @@ jobs:
       - name: Install pinned nightly Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2024-08-01
+          toolchain: nightly-2026-11-10
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -54,10 +57,15 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             fuzz/target
-          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('fuzz/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('fuzz/Cargo.lock') }}
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
+        run: |
+          cargo install --locked --version 0.13.2 cargo-fuzz
+          cargo fuzz --version
+
+      - name: Check locked fuzz dependencies
+        run: cargo check --locked --manifest-path fuzz/Cargo.toml
 
       - name: Fuzz create_invoice (60s)
         run: cargo fuzz run fuzz_create_invoice -- -max_total_time=60
@@ -73,3 +81,7 @@ jobs:
 
       - name: Fuzz sequence (60s)
         run: cargo fuzz run fuzz_sequence -- -max_total_time=60
+
+      - name: Verify fuzz lockfile is unchanged
+        if: always()
+        run: git diff --exit-code -- fuzz/Cargo.lock

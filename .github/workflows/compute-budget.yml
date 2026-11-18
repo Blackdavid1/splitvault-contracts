@@ -16,8 +16,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly-2024-08-01
-          targets: wasm32-unknown-unknown
+          toolchain: nightly-2026-11-10
+          targets: wasm32v1-none
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -30,7 +30,9 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Build contracts
-        run: cargo build --release --target wasm32-unknown-unknown
+        env:
+          SOROBAN_SDK_BUILD_SYSTEM_SUPPORTS_SPEC_SHAKING_V2: 0
+        run: cargo build --release --target wasm32v1-none
 
       - name: Run compute budget estimation
         id: budget
