@@ -62,6 +62,31 @@ fn creator_dashboard_key(creator: &Address) -> (Symbol, Address) {
     (symbol_short!("cr_dash"), creator.clone())
 }
 
+fn is_authorized_split_contract(env: &Env, caller: &Address) -> bool {
+    env.storage()
+        .instance()
+        .get(&authorized_contract_key(caller))
+        .unwrap_or(false)
+}
+
+fn require_authorized_split_contract(env: &Env, caller: &Address) {
+    assert!(
+        is_authorized_split_contract(env, caller),
+        "unauthorized split contract"
+    );
+    caller.require_auth();
+}
+
+fn require_admin(env: &Env) -> Address {
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(&admin_key())
+        .expect("not initialized");
+    admin.require_auth();
+    admin
+}
+
 /// Publish a structured event when a creator's created-invoice metrics update.
 fn dashboard_record_created(env: &Env, creator: &Address, invoice_count: u64, total_volume: i128) {
     env.events().publish(
@@ -183,9 +208,10 @@ impl DashboardContract {
         is_authorized_split_contract(&env, &caller)
     }
 
-    /// Add a created invoice reported by a registered Split.
-    pub fn record_created(env: Env, split_contract: Address, creator: Address, total: i128) {
-        require_authorized_split_contract(&env, &split_contract);
+    /// Record a created invoice. A zero amount increments the count without adding volume.
+    pub fn record_created(env: Env, producer: Address, creator: Address, total: i128) {
+        require_authorized_split_contract(&env, &producer);
+        assert!(total >= 0, "negative dashboard amount");
 
         let key = creator_dashboard_key(&creator);
         let mut dashboard: CreatorDashboard =
@@ -211,9 +237,10 @@ impl DashboardContract {
         );
     }
 
-    /// Add a release reported by a registered Split.
-    pub fn record_released(env: Env, split_contract: Address, creator: Address, total: i128) {
-        require_authorized_split_contract(&env, &split_contract);
+    /// Record a release. A zero amount increments the count without adding volume.
+    pub fn record_released(env: Env, producer: Address, creator: Address, total: i128) {
+        require_authorized_split_contract(&env, &producer);
+        assert!(total >= 0, "negative dashboard amount");
 
         let key = creator_dashboard_key(&creator);
         let mut dashboard: CreatorDashboard =
@@ -239,8 +266,8 @@ impl DashboardContract {
     }
 
     /// Record a refunded invoice for `creator`.
-    pub fn record_refunded(env: Env, split_contract: Address, creator: Address, total: i128) {
-        require_authorized_split_contract(&env, &split_contract);
+    pub fn record_refunded(env: Env, creator: Address, total: i128) {
+        require_authorized_split_contract(&env, &env.current_contract_address());
 
         let key = creator_dashboard_key(&creator);
         let mut dashboard: CreatorDashboard =
@@ -262,12 +289,10 @@ impl DashboardContract {
 
     /// Read the aggregated dashboard for `creator`.
     pub fn get_creator_dashboard(env: Env, creator: Address) -> CreatorDashboard {
-        let key = creator_dashboard_key(&creator);
-        let dashboard: Option<CreatorDashboard> = env.storage().persistent().get(&key);
-        if dashboard.is_some() {
-            refresh_aggregate_ttl(&env, &key);
-        }
-        dashboard.unwrap_or_default()
+        env.storage()
+            .persistent()
+            .get(&creator_dashboard_key(&creator))
+            .unwrap_or_default()
     }
 }
 

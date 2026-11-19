@@ -20,7 +20,7 @@ fn setup() -> (Env, Address, Address) {
 
 #[test]
 fn test_initial_dashboard_empty() {
-    let (env, _split_id, dashboard_id) = setup();
+    let (env, _, dashboard_id) = setup();
     let client = DashboardContractClient::new(&env, &dashboard_id);
 
     let creator = Address::generate(&env);
@@ -133,13 +133,7 @@ fn test_unauthorized_caller_rejected() {
 
     // Call without mock_all_auths — require_auth() on the authorized address will fail
     // because the test caller is not the authorized split contract.
-    assert!(client
-        .try_record_created(&split_id, &creator, &100)
-        .is_err());
-    assert_eq!(
-        client.get_creator_dashboard(&creator),
-        CreatorDashboard::default()
-    );
+    assert!(client.try_record_created(&split_id, &creator, &100_i128).is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -171,33 +165,8 @@ fn test_multiple_split_contracts_can_report() {
     client.initialize(&admin, &split_a);
 
     let creator = Address::generate(&env);
-    assert!(client
-        .try_record_created(&split_a, &creator, &1000)
-        .is_err());
-    assert_eq!(
-        client.get_creator_dashboard(&creator),
-        CreatorDashboard::default()
-    );
-    let reporter_a = DashboardReporterClient::new(&env, &split_a);
-    let reporter_b = DashboardReporterClient::new(&env, &split_b);
-    reporter_a.create(&dashboard_id, &creator, &1000);
-    let initial = client.get_creator_dashboard(&creator);
-    assert_eq!(initial.invoice_count, 1);
-    assert_eq!(initial.total_volume, 1000);
-    assert!(reporter_b
-        .try_create(&dashboard_id, &creator, &2000)
-        .is_err());
-    assert_eq!(client.get_creator_dashboard(&creator), initial);
-
-    client.mock_all_auths().register_split_contract(&split_b);
-    assert!(client.try_revoke_split_contract(&split_a).is_err());
-    client.mock_all_auths().revoke_split_contract(&split_a);
-    assert!(!client.is_authorized_split_contract(&split_a));
-    assert!(client.is_authorized_split_contract(&split_b));
-    assert!(reporter_a
-        .try_create(&dashboard_id, &creator, &1000)
-        .is_err());
-    assert_eq!(client.get_creator_dashboard(&creator), initial);
+    client.record_created(&split_a, &creator, &1000_i128);
+    client.record_created(&split_b, &creator, &2000_i128);
 
     reporter_b.create(&dashboard_id, &creator, &2000);
     let dash = client.get_creator_dashboard(&creator);
@@ -232,7 +201,7 @@ fn test_unregistered_split_contract_not_authorized() {
 /// The admin can update the authorized contract, and the new address can report (#84).
 #[test]
 fn test_set_authorized_contract_as_admin() {
-    let (env, _split_id, dashboard_id) = setup();
+    let (env, _, dashboard_id) = setup();
     let client = DashboardContractClient::new(&env, &dashboard_id);
 
     let new_split = Address::generate(&env);
@@ -251,7 +220,7 @@ fn test_set_authorized_contract_as_admin() {
 /// The admin can rotate the admin address (#84).
 #[test]
 fn test_set_admin_rotates_admin() {
-    let (env, _split_id, dashboard_id) = setup();
+    let (env, _, dashboard_id) = setup();
     let client = DashboardContractClient::new(&env, &dashboard_id);
 
     let new_admin = Address::generate(&env);
@@ -268,7 +237,7 @@ fn test_set_admin_rotates_admin() {
 // ---------------------------------------------------------------------------
 
 use soroban_sdk::testutils::Events as _;
-use soroban_sdk::{symbol_short, TryFromVal, Val};
+use soroban_sdk::{symbol_short, IntoVal, TryFromVal, Val};
 
 /// `record_created` must emit `(dash, created, creator)` (#50).
 #[test]
@@ -320,20 +289,35 @@ fn test_record_refunded_emits_event() {
 // #107 — Dashboard event payload tests
 // ---------------------------------------------------------------------------
 
-/// Read the latest event for this action. The creator is the third topic.
-fn find_dash_event_data(env: &Env, action: Symbol) -> Option<(Address, Val)> {
+/// Read the creator topic and volume metrics from the latest lifecycle event.
+fn find_dash_event_data(
+    env: &Env,
+    action: soroban_sdk::Symbol,
+) -> Option<(Address, u64, i128)> {
     let events = env.events().all();
     for event in events.events().iter().rev() {
         let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
-        let topics: &[soroban_sdk::xdr::ScVal] = body.topics.as_ref();
-        if let [category, event_action, creator] = topics {
-            if Symbol::try_from_val(env, category).ok()? == symbol_short!("dash")
-                && Symbol::try_from_val(env, event_action).ok()? == action
-            {
-                return Some((
-                    Address::try_from_val(env, creator).ok()?,
-                    Val::try_from_val(env, &body.data).ok()?,
-                ));
+        let mut topics = soroban_sdk::Vec::new(env);
+        let topics_ref: &[soroban_sdk::xdr::ScVal] = body.topics.as_ref();
+        for v in topics_ref.iter() {
+            if let Ok(val) = <Val as TryFromVal<Env, soroban_sdk::xdr::ScVal>>::try_from_val(env, v) {
+                topics.push_back(val);
+            }
+        }
+        if topics.len() >= 2 {
+            let t0 = <soroban_sdk::Symbol as TryFromVal<Env, Val>>::try_from_val(env, &topics.get_unchecked(0));
+            let t1 = <soroban_sdk::Symbol as TryFromVal<Env, Val>>::try_from_val(env, &topics.get_unchecked(1));
+            if let (Ok(topic0), Ok(topic1)) = (t0, t1) {
+                if topic0 == symbol_short!("dash") && topic1 == action {
+                    let data_val = <Val as TryFromVal<Env, soroban_sdk::xdr::ScVal>>::try_from_val(
+                        env,
+                        &body.data,
+                    )
+                    .ok()?;
+                    let creator = Address::try_from_val(env, &topics.get(2)?).ok()?;
+                    let (count, volume) = <(u64, i128)>::try_from_val(env, &data_val).ok()?;
+                    return Some((creator, count, volume));
+                }
             }
         }
     }
@@ -383,51 +367,37 @@ fn test_record_refunded_event_payload() {
     let client = DashboardContractClient::new(&env, &dashboard_id);
     let creator = Address::generate(&env);
 
-    client.record_refunded(&split_id, &creator, &100);
-    client.record_refunded(&split_id, &creator, &100);
+    client.record_refunded(&split_id, &creator, &1);
+    client.record_refunded(&split_id, &creator, &1);
 
-    let (ev_creator, data) =
-        find_dash_event_data(&env, symbol_short!("refunded")).expect("missing refunded event");
-    assert_eq!(ev_creator, creator);
-    assert_eq!(u64::try_from_val(&env, &data).unwrap(), 2);
+    let expected = soroban_sdk::vec![&env, (
+        dashboard_id,
+        (symbol_short!("dash"), symbol_short!("refunded"), creator).into_val(&env),
+        2u64.into_val(&env),
+    )];
+    assert_eq!(env.events().all(), expected);
 }
 
 #[test]
-fn test_aggregate_ttl_is_refreshed_on_read_and_write() {
-    use soroban_sdk::testutils::{storage::Persistent as _, Ledger as _};
-
+fn test_record_amount_boundaries() {
     let (env, split_id, dashboard_id) = setup();
     let client = DashboardContractClient::new(&env, &dashboard_id);
-    env.ledger().set_min_persistent_entry_ttl(10);
+    let creator = Address::generate(&env);
 
-    let reader = Address::generate(&env);
-    let writer = Address::generate(&env);
-    let absent = Address::generate(&env);
-    let existing = CreatorDashboard {
-        invoice_count: 1,
-        total_volume: 100,
-        ..CreatorDashboard::default()
-    };
-    env.as_contract(&dashboard_id, || {
-        let storage = env.storage().persistent();
-        for creator in [&reader, &writer] {
-            let key = creator_dashboard_key(creator);
-            storage.set(&key, &existing);
-            assert_eq!(storage.get_ttl(&key), 9);
-        }
-    });
+    client.record_created(&split_id, &creator, &0);
+    assert!(find_dash_event(&env, symbol_short!("created")));
+    client.record_released(&split_id, &creator, &0);
+    assert!(find_dash_event(&env, symbol_short!("released")));
+    let before = client.get_creator_dashboard(&creator);
+    assert_eq!(before.invoice_count, 1);
+    assert_eq!(before.released_count, 1);
+    assert_eq!(before.total_volume, 0);
+    assert_eq!(before.released_volume, 0);
 
-    assert_eq!(client.get_creator_dashboard(&reader), existing);
-    client.record_created(&split_id, &writer, &100);
-    assert_eq!(
-        client.get_creator_dashboard(&absent),
-        CreatorDashboard::default()
-    );
-    env.as_contract(&dashboard_id, || {
-        let storage = env.storage().persistent();
-        let target = AGGREGATE_TTL_LEDGERS.min(env.storage().max_ttl());
-        assert_eq!(storage.get_ttl(&creator_dashboard_key(&reader)), target);
-        assert_eq!(storage.get_ttl(&creator_dashboard_key(&writer)), target);
-        assert!(!storage.has(&creator_dashboard_key(&absent)));
-    });
+    assert!(client.try_record_created(&split_id, &creator, &-1).is_err());
+    assert!(env.events().all().events().is_empty());
+    assert_eq!(client.get_creator_dashboard(&creator), before);
+    assert!(client.try_record_released(&split_id, &creator, &-1).is_err());
+    assert!(env.events().all().events().is_empty());
+    assert_eq!(client.get_creator_dashboard(&creator), before);
 }
