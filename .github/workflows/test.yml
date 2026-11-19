@@ -11,16 +11,15 @@ env:
   SOROBAN_SDK_BUILD_SYSTEM_SUPPORTS_SPEC_SHAKING_V2: 0
 
 jobs:
-  test:
+  package-tests:
+    name: Test ${{ matrix.package }}
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [dashboard, factory, invoice-escrow, registry, split]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install pinned nightly Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly-2024-08-01
-          targets: wasm32v1-none
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -29,23 +28,42 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-test-${{ matrix.package }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
 
-      - name: Run tests
-        run: cargo test --workspace
+      - name: Run package tests
+        run: cargo test --locked -p ${{ matrix.package }}
 
       - name: Storage key snapshot test
-        run: cargo test -p split storage_snapshot
+        if: matrix.package == 'split'
+        run: cargo test --locked -p split storage_snapshot
+
+  test:
+    runs-on: ubuntu-latest
+    needs: package-tests
+    if: ${{ always() }}
+    steps:
+      - name: Require every package suite to pass
+        env:
+          PACKAGE_TESTS_RESULT: ${{ needs.package-tests.result }}
+        run: test "$PACKAGE_TESTS_RESULT" = success
 
   fuzz:
+    name: Fuzz ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_create_invoice
+          - fuzz_pay
+          - fuzz_release
+          - fuzz_refund
+          - fuzz_sequence
+          - fuzz_fee_deduct
+          - fuzz_ratio_validation
+          - fuzz_split_arithmetic
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install pinned nightly Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly-2024-08-01
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -54,22 +72,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             fuzz/target
-          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('fuzz/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-fuzz-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
+        run: cargo install --locked cargo-fuzz --version 0.13.2
 
-      - name: Fuzz create_invoice (60s)
-        run: cargo fuzz run fuzz_create_invoice -- -max_total_time=60
+      - name: Verify locked fuzz dependencies
+        run: cargo metadata --locked --manifest-path fuzz/Cargo.toml --format-version 1 > /dev/null
 
-      - name: Fuzz pay (60s)
-        run: cargo fuzz run fuzz_pay -- -max_total_time=60
-
-      - name: Fuzz release (60s)
-        run: cargo fuzz run fuzz_release -- -max_total_time=60
-
-      - name: Fuzz refund (60s)
-        run: cargo fuzz run fuzz_refund -- -max_total_time=60
-
-      - name: Fuzz sequence (60s)
-        run: cargo fuzz run fuzz_sequence -- -max_total_time=60
+      - name: Fuzz target (60s)
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60

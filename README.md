@@ -30,32 +30,29 @@ SplitVault lets users create on-chain invoices where multiple payers each owe a 
 
 ### Prerequisites
 
-- Rust 1.84+ with `wasm32-unknown-unknown` target
-- stellar-cli
+- Rustup (installs the pinned toolchain and `wasm32v1-none` target from `rust-toolchain.toml`)
+- stellar-cli 25.2.0 or newer
 
 ```bash
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Add WASM target
-rustup target add wasm32-unknown-unknown
-
 # Install stellar-cli
-cargo install --locked stellar-cli --features opt
+cargo install --locked stellar-cli --version 25.2.0
 ```
 
 ### Clone & Build
 
 ```bash
-git clone https://github.com/splitvault/split-contracts.git
-cd split-contracts
-cargo build --target wasm32-unknown-unknown --release
+git clone https://github.com/joromi1/splitvault-contracts.git
+cd splitvault-contracts
+stellar contract build --locked
 ```
 
 ### Run Tests
 
 ```bash
-cargo test --workspace
+cargo test --locked --workspace
 ```
 
 ## Contract Function Reference

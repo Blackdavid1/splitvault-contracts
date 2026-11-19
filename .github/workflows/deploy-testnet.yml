@@ -9,11 +9,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -21,16 +16,17 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Install stellar-cli
-        run: cargo install --locked stellar-cli
+        shell: bash
+        run: |
+          curl -fsSL https://github.com/stellar/stellar-cli/releases/download/v25.2.0/stellar-cli-25.2.0-x86_64-unknown-linux-gnu.tar.gz |
+            tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
       - name: Build contract (release)
-        run: cargo build --target wasm32-unknown-unknown --release --package split
+        run: stellar contract build --locked --package split
 
       - name: Configure testnet identity
         run: stellar keys generate deployer --network testnet
@@ -45,7 +41,7 @@ jobs:
       - name: Deploy contract
         run: |
           stellar contract deploy \
-            --wasm target/wasm32-unknown-unknown/release/split.wasm \
+            --wasm target/wasm32v1-none/release/split.wasm \
             --source deployer \
             --network testnet \
             --rpc-url https://soroban-testnet.stellar.org \
