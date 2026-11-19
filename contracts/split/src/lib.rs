@@ -264,7 +264,7 @@ fn paid_flags_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("paid_flg"), id)
 }
 
-/// Issue #333: u8 bitmask of milestones already emitted — instance storage.
+/// Issue #333: milestone bitmask, cached in instance storage until archival.
 /// Bit 0 = 25 %, Bit 1 = 50 %, Bit 2 = 75 %, Bit 3 = 100 %.
 fn milestone_flags_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("ms_flgs"), id)
@@ -1739,6 +1739,8 @@ fn bump_invoice_entry_ttl(env: &Env, id: u64) {
         invoice_ext_key(id),
         invoice_ext2_key(id),
         invoice_compact_key(id),
+        archive_marker_key(id),
+        milestone_flags_key(id),
     ] {
         if storage.has(&key) {
             storage.extend_ttl(&key, threshold, extend_to);
@@ -1750,147 +1752,17 @@ fn bump_invoice_entry_ttl(env: &Env, id: u64) {
 // Storage helpers
 // ---------------------------------------------------------------------------
 
-fn archive_invoice_storage(env: &Env, id: u64, core: &InvoiceCore) {
-    let ext: InvoiceExt = env
-        .storage()
-        .persistent()
-        .get(&invoice_ext_key(id))
-        .or_else(|| env.storage().instance().get(&invoice_ext_key(id)))
-        .unwrap_or_else(|| InvoiceExt {
-            co_signers: Vec::new(env),
-            required_signatures: 0,
-            signatures: Vec::new(env),
-            approver: None,
-            approved: false,
-            condition_oracle: None,
-            condition_met: false,
-            penalty_bps: 0,
-            penalty_deadline: 0,
-            min_funding_bps: 0,
-            release_stages: Vec::new(env),
-            released_stages: 0,
-            allowed_payers: None,
-            price_oracle: None,
-            base_amounts: Vec::new(env),
-            swap_tokens: Vec::new(env),
-            tax_bps: 0,
-            tax_authority: None,
-            insurance_premium_bps: 0,
-            insurance_fund: 0,
-            smart_route: false,
-            convert_to_stream: false,
-            accepted_tokens: Vec::new(env),
-            forward_to: None,
-            forward_invoice_id: None,
-            split_rules: Vec::new(env),
-            auto_resolve_rules: Vec::new(env),
-            creator_cosigner: None,
-            velocity_limit: 0,
-            velocity_window: 0,
-            parent_invoice_id: None,
-            pause_reason: None,
-            auto_resume_at: None,
-            payment_cooldown_secs: None,
-            max_payments_per_window: None,
-            payment_window_secs: None,
-            scheduled_release_at: None,
-            refund_grace_secs: None,
-            penalty_tiers: Vec::new(env),
-            allowed_callers: None,
-        });
-    let ext2: InvoiceExt2 = env
-        .storage()
-        .persistent()
-        .get(&invoice_ext2_key(id))
-        .or_else(|| env.storage().instance().get(&invoice_ext2_key(id)))
-        .unwrap_or_else(|| InvoiceExt2 {
-            notification_contract: None,
-            overflow_behavior: OverflowBehavior::Reject,
-            cross_chain_ref: None,
-            require_kyc: false,
-            arbiter: None,
-            disputed: false,
-            admin_frozen: false,
-            auction_on_expiry: false,
-            auction_end: 0,
-            bids: Vec::new(env),
-            min_payment: 0,
-            min_funding_amount: 0,
-            priorities: Vec::new(env),
-            target_usd_cents: None,
-            refunded_addresses: Vec::new(env),
-            oracle: None,
-            oracle_asset_pair_base: None,
-            oracle_asset_pair_quote: None,
-            min_payer_rep: None,
-            escrow_hold_period: None,
-            held_until: None,
-            milestones: Vec::new(env),
-            milestones_released: 0,
-            recipient_max_payouts: Vec::new(env),
-            twafr_numerator: 0,
-            twafr_last_ledger: 0,
-            release_condition_hash: None,
-            recipient_whitelist_enabled: false,
-            overfunding_policy: OverfundingPolicy::Cap,
-            contributor_allowlist: None,
-            early_bird_window_ledgers: 0,
-            early_bird_fee_bps: 0,
-            early_bird_fee_credit: 0,
-            creator_fee_bps: 0,
-            ratio_denominator: 1,
-            ratios: Vec::new(env),
-        });
-
-    env.storage().instance().set(&invoice_key(id), core);
-    env.storage().instance().set(&invoice_ext_key(id), &ext);
-    env.storage().instance().set(&invoice_ext2_key(id), &ext2);
-    env.storage().instance().set(&archive_marker_key(id), &true);
-
-    let compact = env
-        .storage()
-        .persistent()
-        .get::<_, CompactInvoice>(&invoice_compact_key(id))
-        .or_else(|| env.storage().instance().get(&invoice_compact_key(id)))
-        .unwrap_or_else(|| {
-            let invoice = Invoice::assemble(core.clone(), ext.clone(), ext2.clone());
-            invoice.to_compact(env)
-        });
-    env.storage()
-        .instance()
-        .set(&invoice_compact_key(id), &compact);
-
-    for shard_id in 0..SHARD_COUNT {
-        let shard_key = pay_shard_key(id, shard_id);
-        if let Some(payments) = env
-            .storage()
-            .persistent()
-            .get::<(Symbol, u64, u64), Vec<Payment>>(&shard_key)
-        {
-            env.storage().instance().set(&shard_key, &payments);
-        }
-        env.storage().persistent().remove(&shard_key);
+fn archive_invoice_storage(env: &Env, id: u64) {
+    let instance = env.storage().instance();
+    let persistent = env.storage().persistent();
+    let milestone_key = milestone_flags_key(id);
+    if let Some(flags) = instance.get::<_, u32>(&milestone_key) {
+        persistent.set(&milestone_key, &flags);
+        instance.remove(&milestone_key);
     }
-
-    if let Some(audit_log) = env
-        .storage()
-        .persistent()
-        .get::<_, Vec<AuditEntry>>(&audit_log_key(id))
-    {
-        env.storage().instance().set(&audit_log_key(id), &audit_log);
-    }
-    env.storage().persistent().remove(&invoice_key(id));
-    env.storage().persistent().remove(&invoice_ext_key(id));
-    env.storage().persistent().remove(&invoice_ext2_key(id));
-    env.storage().persistent().remove(&invoice_compact_key(id));
-    env.storage().persistent().remove(&audit_log_key(id));
-    env.storage().instance().set(
-        &created_ledger_key(id),
-        &env.storage()
-            .persistent()
-            .get::<_, u32>(&created_ledger_key(id))
-            .unwrap_or_else(|| env.ledger().sequence()),
-    );
+    persistent.set(&archive_marker_key(id), &true);
+    instance.remove(&invoice_hot_key(id));
+    bump_invoice_entry_ttl(env, id);
 }
 
 fn maybe_archive_invoice(env: &Env, id: u64) {
@@ -1928,7 +1800,7 @@ fn maybe_archive_invoice(env: &Env, id: u64) {
         return;
     }
 
-    archive_invoice_storage(env, id, &core);
+    archive_invoice_storage(env, id);
     events::invoice_archived(env, id);
 }
 
@@ -2142,67 +2014,23 @@ fn save_invoice(env: &Env, id: u64, invoice: &Invoice) {
     let archived = env.storage().instance().has(&archive_marker_key(id))
         || env.storage().persistent().has(&archive_marker_key(id));
 
-    if archived {
-        env.storage().instance().set(&invoice_key(id), &core);
-        env.storage().instance().set(&invoice_ext_key(id), &ext);
-        env.storage().instance().set(&invoice_ext2_key(id), &ext2);
-        env.storage().persistent().remove(&invoice_key(id));
-        env.storage().persistent().remove(&invoice_ext_key(id));
-        env.storage().persistent().remove(&invoice_ext2_key(id));
-    } else {
-        env.storage().persistent().set(&invoice_key(id), &core);
-        env.storage().persistent().set(&invoice_ext_key(id), &ext);
-        env.storage().persistent().set(&invoice_ext2_key(id), &ext2);
-        // Keep the persistent invoice record alive as long as its instance-storage
-        // hot overlay: without this, load_invoice's persistent InvoiceCore read
-        // (which the hot overlay never fully replaces — amounts, deadline, etc.
-        // stay on `core`) can hit an expired/archived entry well before the
-        // invoice's actual lifecycle ends.
-        env.storage().persistent().extend_ttl(
-            &invoice_key(id),
-            INVOICE_HOT_TTL_LEDGERS / 2,
-            INVOICE_HOT_TTL_LEDGERS,
-        );
-        env.storage().persistent().extend_ttl(
-            &invoice_ext_key(id),
-            INVOICE_HOT_TTL_LEDGERS / 2,
-            INVOICE_HOT_TTL_LEDGERS,
-        );
-        env.storage().persistent().extend_ttl(
-            &invoice_ext2_key(id),
-            INVOICE_HOT_TTL_LEDGERS / 2,
-            INVOICE_HOT_TTL_LEDGERS,
-        );
-    }
+    let storage = env.storage().persistent();
+    storage.set(&invoice_key(id), &core);
+    storage.set(&invoice_ext_key(id), &ext);
+    storage.set(&invoice_ext2_key(id), &ext2);
+    storage.set(&invoice_compact_key(id), &invoice.to_compact(env));
 
-    // Store compact representation in the same tier as the invoice data.
-    let compact = invoice.to_compact(env);
-    if archived {
-        env.storage()
-            .instance()
-            .set(&invoice_compact_key(id), &compact);
-        env.storage().persistent().remove(&invoice_compact_key(id));
+    if !archived {
+        let hot = InvoiceHot {
+            status: invoice.status.clone(),
+            funded: invoice.funded,
+            total: invoice.amounts.iter().sum(),
+            recipients: invoice.recipients.clone(),
+        };
+        env.storage().instance().set(&invoice_hot_key(id), &hot);
     } else {
-        env.storage()
-            .persistent()
-            .set(&invoice_compact_key(id), &compact);
-        env.storage().persistent().extend_ttl(
-            &invoice_compact_key(id),
-            INVOICE_HOT_TTL_LEDGERS / 2,
-            INVOICE_HOT_TTL_LEDGERS,
-        );
+        env.storage().instance().remove(&invoice_hot_key(id));
     }
-
-    // Write hot fields to instance storage and bump TTL.
-    // status, funded, and recipients change on pay/release/refund paths.
-    let total: i128 = invoice.amounts.iter().sum();
-    let hot = InvoiceHot {
-        status: invoice.status.clone(),
-        funded: invoice.funded,
-        total,
-        recipients: invoice.recipients.clone(),
-    };
-    env.storage().instance().set(&invoice_hot_key(id), &hot);
 
     // Issue #334: keep compact status byte in sync with every save.
     save_compact_status(env, id, &invoice.status);
@@ -2287,26 +2115,9 @@ fn append_audit_entry(env: &Env, id: u64, action: Symbol, actor: &Address) {
         actor: actor.clone(),
         timestamp,
     };
-    let archived = env.storage().instance().has(&archive_marker_key(id))
-        || env.storage().persistent().has(&archive_marker_key(id));
-    let mut log: Vec<AuditEntry> = if archived {
-        env.storage()
-            .instance()
-            .get(&audit_log_key(id))
-            .unwrap_or_else(|| Vec::new(env))
-    } else {
-        env.storage()
-            .persistent()
-            .get(&audit_log_key(id))
-            .unwrap_or_else(|| Vec::new(env))
-    };
+    let mut log = get_audit_log(env, id);
     log.push_back(entry);
-    if archived {
-        env.storage().instance().set(&audit_log_key(id), &log);
-        env.storage().persistent().remove(&audit_log_key(id));
-    } else {
-        env.storage().persistent().set(&audit_log_key(id), &log);
-    }
+    env.storage().persistent().set(&audit_log_key(id), &log);
 }
 
 fn notify_invoice(
@@ -2932,6 +2743,12 @@ pub struct SplitContract;
 #[contractimpl]
 #[allow(clippy::too_many_arguments)]
 impl SplitContract {
+    /// Initialize the testnet build in the deployment transaction.
+    #[cfg(feature = "testnet-constructor")]
+    pub fn __constructor(env: Env, admin: Address, usdc_token: Address) {
+        Self::initialize(env, admin.clone(), 0, admin, usdc_token, 0, None, 0, 0, 0);
+    }
+
     /// Set the contract admin, creation fee, treasury, USDC token, and platform fee.
     /// Can only be called once.
     pub fn initialize(
@@ -6822,12 +6639,35 @@ impl SplitContract {
         assert!(source.creator == creator, "not invoice creator");
         assert!(source.clone_depth < 5, "max clone depth exceeded");
 
+        // CloneOverrides uses fixed amounts. Proportional ratios are inherited
+        // and must still align with the destination recipients.
+        let overrides_split = overrides.new_recipients.is_some();
+        if overrides_split != overrides.new_amounts.is_some() {
+            env.panic_with_error(ContractError::LengthMismatch);
+        }
+
         let recipients = overrides
             .new_recipients
             .unwrap_or_else(|| source.recipients.clone());
         let amounts = overrides
             .new_amounts
             .unwrap_or_else(|| source.amounts.clone());
+        if recipients.len() != amounts.len()
+            || (!source.ratios.is_empty() && recipients.len() != source.ratios.len())
+        {
+            env.panic_with_error(ContractError::LengthMismatch);
+        }
+        if overrides_split {
+            if recipients.is_empty() {
+                env.panic_with_error(ContractError::EmptyRecipientList);
+            }
+            if amounts.iter().any(|amount| amount <= 0) {
+                env.panic_with_error(ContractError::InvalidAmount);
+            }
+            if let Err(error) = validation::assert_unique_recipients(&env, &recipients) {
+                env.panic_with_error(error);
+            }
+        }
         let deadline = overrides.new_deadline.unwrap_or(source.deadline);
         let overflow_behavior = overrides
             .new_overflow_behavior
@@ -14014,17 +13854,10 @@ impl SplitContract {
     // Archive (issue #40)
     // -----------------------------------------------------------------------
 
-    /// Move a Released or Refunded invoice from persistent storage to instance
-    /// storage (cheaper, shorter TTL), freeing up persistent storage budget.
-    ///
-    /// Panics with "invoice not completed" if the invoice is still Pending or Cancelled.
-    /// After archival, `get_invoice` still returns the invoice from instance storage.
+    /// Mark a Released or Refunded invoice as archived in persistent storage.
+    /// Panics with "invoice not completed" for invoices that have not settled.
     pub fn archive_invoice(env: Env, invoice_id: u64) {
-        if env
-            .storage()
-            .instance()
-            .has(&archive_marker_key(invoice_id))
-        {
+        if Self::is_archived(env.clone(), invoice_id) {
             return;
         }
 
@@ -14034,235 +13867,29 @@ impl SplitContract {
             .get(&invoice_key(invoice_id))
             .or_else(|| env.storage().instance().get(&invoice_key(invoice_id)))
             .expect("invoice not found");
-
         assert!(
             core.status == InvoiceStatus::Released || core.status == InvoiceStatus::Refunded,
             "invoice not completed"
         );
 
-        let ext: InvoiceExt = env
-            .storage()
-            .persistent()
-            .get(&invoice_ext_key(invoice_id))
-            .unwrap_or_else(|| InvoiceExt {
-                co_signers: Vec::new(&env),
-                required_signatures: 0,
-                signatures: Vec::new(&env),
-                approver: None,
-                approved: false,
-                condition_oracle: None,
-                condition_met: false,
-                penalty_bps: 0,
-                penalty_deadline: 0,
-                min_funding_bps: 0,
-                release_stages: Vec::new(&env),
-                released_stages: 0,
-                allowed_payers: None,
-                price_oracle: None,
-                base_amounts: Vec::new(&env),
-                swap_tokens: Vec::new(&env),
-                tax_bps: 0,
-                tax_authority: None,
-                insurance_premium_bps: 0,
-                insurance_fund: 0,
-                smart_route: false,
-                convert_to_stream: false,
-                accepted_tokens: Vec::new(&env),
-                forward_to: None,
-                forward_invoice_id: None,
-                split_rules: Vec::new(&env),
-                auto_resolve_rules: Vec::new(&env),
-                creator_cosigner: None,
-                velocity_limit: 0,
-                velocity_window: 0,
-                parent_invoice_id: None,
-                pause_reason: None,
-                auto_resume_at: None,
-                payment_cooldown_secs: None,
-                max_payments_per_window: None,
-                payment_window_secs: None,
-                scheduled_release_at: None,
-                refund_grace_secs: None,
-                penalty_tiers: Vec::new(&env),
-                allowed_callers: None,
-            });
-        let ext2: InvoiceExt2 = env
-            .storage()
-            .persistent()
-            .get(&invoice_ext2_key(invoice_id))
-            .unwrap_or_else(|| InvoiceExt2 {
-                notification_contract: None,
-                overflow_behavior: OverflowBehavior::Reject,
-                cross_chain_ref: None,
-                require_kyc: false,
-                arbiter: None,
-                disputed: false,
-                admin_frozen: false,
-                auction_on_expiry: false,
-                auction_end: 0,
-                bids: Vec::new(&env),
-                min_payment: 0,
-                min_funding_amount: 0,
-                priorities: Vec::new(&env),
-                target_usd_cents: None,
-                refunded_addresses: Vec::new(&env),
-                oracle: None,
-                oracle_asset_pair_base: None,
-                oracle_asset_pair_quote: None,
-                min_payer_rep: None,
-                escrow_hold_period: None,
-                held_until: None,
-                milestones: Vec::new(&env),
-                milestones_released: 0,
-                recipient_max_payouts: Vec::new(&env),
-                twafr_numerator: 0,
-                twafr_last_ledger: 0,
-                release_condition_hash: None,
-                recipient_whitelist_enabled: false,
-                overfunding_policy: OverfundingPolicy::Cap,
-                contributor_allowlist: None,
-                early_bird_window_ledgers: 0,
-                early_bird_fee_bps: 0,
-                early_bird_fee_credit: 0,
-                creator_fee_bps: 0,
-                ratio_denominator: 1,
-                ratios: Vec::new(&env),
-            });
-
-        // Copy to instance storage.
-        env.storage()
-            .instance()
-            .set(&invoice_key(invoice_id), &core);
-        env.storage()
-            .instance()
-            .set(&invoice_ext_key(invoice_id), &ext);
-        env.storage()
-            .instance()
-            .set(&invoice_ext2_key(invoice_id), &ext2);
-
-        // Remove from persistent storage.
-        env.storage().persistent().remove(&invoice_key(invoice_id));
-        env.storage()
-            .persistent()
-            .remove(&invoice_ext_key(invoice_id));
-        env.storage()
-            .persistent()
-            .remove(&invoice_ext2_key(invoice_id));
-
+        archive_invoice_storage(&env, invoice_id);
         events::invoice_archived(&env, invoice_id);
     }
 
-    /// Batch archive sweep. Accepts up to 20 invoice IDs; archives those that are
-    /// Released or Refunded. Returns the list of IDs actually archived.
+    /// Archive up to 20 invoices, returning the IDs newly archived.
     pub fn archive_invoices_batch(env: Env, invoice_ids: Vec<u64>) -> Vec<u64> {
         assert!(invoice_ids.len() <= 20, "batch limit exceeded");
 
-        let mut archived: Vec<u64> = Vec::new(&env);
-        for i in 0..invoice_ids.len() {
-            let id = invoice_ids.get(i).unwrap();
-            let exists = env.storage().persistent().has(&invoice_key(id));
-            if !exists {
+        let mut archived = Vec::new(&env);
+        for id in invoice_ids {
+            if Self::is_archived(env.clone(), id) {
                 continue;
             }
-            let core: InvoiceCore = env.storage().persistent().get(&invoice_key(id)).unwrap();
-            if core.status == InvoiceStatus::Released || core.status == InvoiceStatus::Refunded {
-                let ext: InvoiceExt = env
-                    .storage()
-                    .persistent()
-                    .get(&invoice_ext_key(id))
-                    .unwrap_or_else(|| InvoiceExt {
-                        co_signers: Vec::new(&env),
-                        required_signatures: 0,
-                        signatures: Vec::new(&env),
-                        approver: None,
-                        approved: false,
-                        condition_oracle: None,
-                        condition_met: false,
-                        penalty_bps: 0,
-                        penalty_deadline: 0,
-                        min_funding_bps: 0,
-                        release_stages: Vec::new(&env),
-                        released_stages: 0,
-                        allowed_payers: None,
-                        price_oracle: None,
-                        base_amounts: Vec::new(&env),
-                        swap_tokens: Vec::new(&env),
-                        tax_bps: 0,
-                        tax_authority: None,
-                        insurance_premium_bps: 0,
-                        insurance_fund: 0,
-                        smart_route: false,
-                        convert_to_stream: false,
-                        accepted_tokens: Vec::new(&env),
-                        forward_to: None,
-                        forward_invoice_id: None,
-                        split_rules: Vec::new(&env),
-                        auto_resolve_rules: Vec::new(&env),
-                        creator_cosigner: None,
-                        velocity_limit: 0,
-                        velocity_window: 0,
-                        parent_invoice_id: None,
-                        pause_reason: None,
-                        auto_resume_at: None,
-                        payment_cooldown_secs: None,
-                        max_payments_per_window: None,
-                        payment_window_secs: None,
-                        scheduled_release_at: None,
-                        refund_grace_secs: None,
-                        penalty_tiers: Vec::new(&env),
-                        allowed_callers: None,
-                    });
-                let ext2: InvoiceExt2 = env
-                    .storage()
-                    .persistent()
-                    .get(&invoice_ext2_key(id))
-                    .unwrap_or_else(|| InvoiceExt2 {
-                        notification_contract: None,
-                        overflow_behavior: OverflowBehavior::Reject,
-                        cross_chain_ref: None,
-                        require_kyc: false,
-                        arbiter: None,
-                        disputed: false,
-                        admin_frozen: false,
-                        auction_on_expiry: false,
-                        auction_end: 0,
-                        bids: Vec::new(&env),
-                        min_payment: 0,
-                        min_funding_amount: 0,
-                        priorities: Vec::new(&env),
-                        target_usd_cents: None,
-                        refunded_addresses: Vec::new(&env),
-                        oracle: None,
-                        oracle_asset_pair_base: None,
-                        oracle_asset_pair_quote: None,
-                        min_payer_rep: None,
-                        escrow_hold_period: None,
-                        held_until: None,
-                        milestones: Vec::new(&env),
-                        milestones_released: 0,
-                        recipient_max_payouts: Vec::new(&env),
-                        twafr_numerator: 0,
-                        twafr_last_ledger: 0,
-                        release_condition_hash: None,
-                        recipient_whitelist_enabled: false,
-                        overfunding_policy: OverfundingPolicy::Cap,
-                        contributor_allowlist: None,
-                        early_bird_window_ledgers: 0,
-                        early_bird_fee_bps: 0,
-                        early_bird_fee_credit: 0,
-                        creator_fee_bps: 0,
-                        ratio_denominator: 1,
-                        ratios: Vec::new(&env),
-                    });
-
-                env.storage().instance().set(&invoice_key(id), &core);
-                env.storage().instance().set(&invoice_ext_key(id), &ext);
-                env.storage().instance().set(&invoice_ext2_key(id), &ext2);
-
-                env.storage().persistent().remove(&invoice_key(id));
-                env.storage().persistent().remove(&invoice_ext_key(id));
-                env.storage().persistent().remove(&invoice_ext2_key(id));
-
+            let core: Option<InvoiceCore> = env.storage().persistent().get(&invoice_key(id));
+            if core.is_some_and(|core| {
+                core.status == InvoiceStatus::Released || core.status == InvoiceStatus::Refunded
+            }) {
+                archive_invoice_storage(&env, id);
                 archived.push_back(id);
                 events::invoice_archived(&env, id);
             }
@@ -16026,10 +15653,12 @@ impl SplitContract {
     ///
     /// Returns 0 when no milestones have been crossed yet.
     pub fn get_milestone_flags(env: Env, invoice_id: u64) -> u32 {
+        let key = milestone_flags_key(invoice_id);
         env.storage()
             .instance()
-            .get(&milestone_flags_key(invoice_id))
-            .unwrap_or(0u32)
+            .get(&key)
+            .or_else(|| env.storage().persistent().get(&key))
+            .unwrap_or(0)
     }
 
     // -----------------------------------------------------------------------
@@ -16792,10 +16421,14 @@ impl SplitContract {
 
     /// Retrieve an archived invoice by ID.
     pub fn get_archived_invoice(env: Env, invoice_id: u64) -> InvoiceCore {
-        env.storage()
-            .persistent()
-            .get(&archived_key(invoice_id))
-            .expect("archived invoice not found")
+        if let Some(core) = env.storage().persistent().get(&archived_key(invoice_id)) {
+            return core;
+        }
+        assert!(
+            Self::is_archived(env.clone(), invoice_id),
+            "archived invoice not found"
+        );
+        Self::get_invoice(env, invoice_id)
     }
 
     /// Retrieve the leaderboard for an invoice.
@@ -16954,27 +16587,51 @@ impl SplitContract {
             .expect("template not found")
     }
 
-    /// Issue #563: Extend the TTL of a live invoice.
-    ///
-    /// Callable by any address. Bumps the TTL of all DataKey entries associated
-    /// with the invoice to the maximum allowed duration, preventing silent
-    /// expiration during long-running campaigns or dispute periods.
+    /// Extend the persistent TTL of an invoice and every existing payment shard.
     pub fn bump_invoice_ttl(env: Env, invoice_id: u64) {
-        let _invoice = load_invoice(&env, invoice_id);
+        let storage = env.storage().persistent();
+        let instance = env.storage().instance();
+        let core_key = invoice_key(invoice_id);
+        let has_legacy_core = instance.has(&core_key);
+        assert!(
+            storage.has(&core_key) || has_legacy_core,
+            "invoice not found"
+        );
 
-        // Bump TTL for all known invoice keys
-        let min_ttl = constants::MIN_INVOICE_TTL_LEDGERS;
-        let max_ttl = constants::MAX_INVOICE_TTL_LEDGERS;
+        let max_ttl = constants::MAX_INVOICE_TTL_LEDGERS.min(env.storage().max_ttl());
+        let threshold = constants::MIN_INVOICE_TTL_LEDGERS.min(max_ttl);
+        for key in [
+            core_key,
+            invoice_ext_key(invoice_id),
+            invoice_ext2_key(invoice_id),
+            invoice_compact_key(invoice_id),
+            compact_status_key(invoice_id),
+            created_ledger_key(invoice_id),
+            audit_log_key(invoice_id),
+            archive_marker_key(invoice_id),
+            milestone_flags_key(invoice_id),
+            metadata_hash_key(invoice_id),
+            recipients_list_key(invoice_id),
+            amounts_list_key(invoice_id),
+        ] {
+            if storage.has(&key) {
+                storage.extend_ttl(&key, threshold, max_ttl);
+            }
+        }
 
         use storage_keys::InvoiceKey;
-        let keys = [
+        for key in [
             InvoiceKey::Invoice(invoice_id),
             InvoiceKey::InvoiceExt(invoice_id),
             InvoiceKey::InvoiceExt2(invoice_id),
             InvoiceKey::RecipientsList(invoice_id),
             InvoiceKey::AmountsList(invoice_id),
             InvoiceKey::PaidFlags(invoice_id),
-        ];
+        ] {
+            if storage.has(&key) {
+                storage.extend_ttl(&key, threshold, max_ttl);
+            }
+        }
 
         for key in &keys {
             env.storage().persistent().extend_ttl(key, min_ttl, max_ttl);

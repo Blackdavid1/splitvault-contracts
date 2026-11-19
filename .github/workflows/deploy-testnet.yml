@@ -2,6 +2,11 @@ name: Deploy to Testnet
 
 on:
   workflow_dispatch:
+    inputs:
+      usdc_token:
+        description: Testnet USDC token contract address
+        required: true
+        type: string
 
 concurrency:
   group: deploy-testnet-${{ github.ref }}

@@ -3891,6 +3891,106 @@ fn test_archive_released_invoice_still_readable() {
 }
 
 #[test]
+fn test_archiving_twenty_invoices_keeps_invoice_data_out_of_instance_storage() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &2_000);
+    env.ledger().set_timestamp(1_000);
+
+    let mut batch = Vec::new(&env);
+    for index in 0..20 {
+        let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+        c.pay(&payer, &id, &100, &0, &false, &false, &None);
+        if index < 10 {
+            c.archive_invoice(&id);
+        } else {
+            batch.push_back(id);
+        }
+    }
+    assert_eq!(c.archive_invoices_batch(&batch), batch);
+    assert!(c.archive_invoices_batch(&batch).is_empty());
+
+    env.as_contract(&contract_id, || {
+        let instance = env.storage().instance();
+        let persistent = env.storage().persistent();
+        for id in 1..=20 {
+            for key in [
+                invoice_key(id),
+                invoice_ext_key(id),
+                invoice_ext2_key(id),
+                invoice_compact_key(id),
+                invoice_hot_key(id),
+                audit_log_key(id),
+                created_ledger_key(id),
+                archive_marker_key(id),
+                milestone_flags_key(id),
+            ] {
+                assert!(!instance.has(&key));
+            }
+            assert!(!instance.has(&pay_shard_key(id, compute_shard_id(&env, &payer))));
+            assert!(persistent.has(&invoice_key(id)));
+            assert!(persistent.has(&archive_marker_key(id)));
+        }
+    });
+    for id in 1..=20 {
+        assert!(c.is_archived(&id));
+        assert_eq!(c.get_archived_invoice(&id).status, InvoiceStatus::Released);
+        assert_eq!(c.get_invoice_payment_count(&id), 1);
+        assert_eq!(c.get_milestone_flags(&id), 0b1111);
+    }
+}
+
+#[test]
+fn test_bump_invoice_ttl_extends_four_payment_shards() {
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    env.ledger().set_max_entry_ttl(2_000_000);
+    env.ledger().set_timestamp(1_000);
+    let id = make_invoice(&env, &c, &creator, &recipient, 100, &token_id, 9_999);
+
+    let mut shards = Vec::new(&env);
+    while shards.len() < 4 {
+        let payer = Address::generate(&env);
+        let shard = compute_shard_id(&env, &payer);
+        if !shards.contains(shard) {
+            shards.push_back(shard);
+            StellarAssetClient::new(&env, &token_id).mint(&payer, &10);
+            c.pay(&payer, &id, &10, &0, &false, &false, &None);
+        }
+    }
+
+    let initial = env.as_contract(&contract_id, || {
+        let storage = env.storage().persistent();
+        shards
+            .iter()
+            .map(|shard| storage.get_ttl(&pay_shard_key(id, shard)))
+            .max()
+            .unwrap()
+    });
+    c.bump_invoice_ttl(&id);
+    env.as_contract(&contract_id, || {
+        let storage = env.storage().persistent();
+        let header_ttl = storage.get_ttl(&invoice_key(id));
+        assert!(header_ttl > initial);
+        for shard in 0..SHARD_COUNT {
+            let key = pay_shard_key(id, shard);
+            if shards.contains(shard) {
+                assert_eq!(storage.get_ttl(&key), header_ttl);
+            } else {
+                assert!(!storage.has(&key));
+            }
+        }
+    });
+}
+
+#[test]
 #[should_panic(expected = "invoice not completed")]
 fn test_archive_pending_invoice_panics() {
     let (env, contract_id, token_id) = setup_initialized();
@@ -5529,6 +5629,70 @@ fn test_clone_invoice_emits_ledger_sequence_in_event_data() {
         let (ledger_seq,): (u32,) = data_val.try_into_val(&env).unwrap();
         assert_eq!(ledger_seq, 42);
     }
+}
+
+#[test]
+fn test_clone_rejects_unpaired_or_mismatched_split_overrides() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let mut options = default_options(&env);
+    options.ratios = soroban_sdk::vec![&env, 5_000_u32, 5_000_u32];
+    options.ext.ratio_denominator = 10_000;
+    let id = c.create_invoice(
+        &creator,
+        &soroban_sdk::vec![&env, recipient.clone(), Address::generate(&env)],
+        &soroban_sdk::vec![&env, 50_i128, 50_i128],
+        &token_id,
+        &9_999,
+        &options,
+    );
+
+    let mut overrides = types::CloneOverrides {
+        new_deadline: None,
+        new_amounts: Some(soroban_sdk::vec![&env, 50_i128, 50_i128]),
+        new_recipients: Some(soroban_sdk::vec![
+            &env,
+            recipient,
+            Address::generate(&env),
+            Address::generate(&env),
+        ]),
+        new_overflow_behavior: None,
+        new_metadata_hash: None,
+    };
+    assert_eq!(
+        c.try_clone_invoice(&creator, &id, &overrides),
+        Err(Ok(ContractError::LengthMismatch.into()))
+    );
+
+    overrides.new_amounts = Some(soroban_sdk::vec![&env, 50_i128, 50_i128, 50_i128]);
+    assert_eq!(
+        c.try_clone_invoice(&creator, &id, &overrides),
+        Err(Ok(ContractError::LengthMismatch.into()))
+    );
+
+    overrides.new_amounts = None;
+    assert_eq!(
+        c.try_clone_invoice(&creator, &id, &overrides),
+        Err(Ok(ContractError::LengthMismatch.into()))
+    );
+}
+
+#[cfg(feature = "testnet-constructor")]
+#[test]
+fn test_testnet_constructor_initializes_deployer_as_admin() {
+    let env = Env::default();
+    let deployer = Address::generate(&env);
+    let usdc_token = Address::generate(&env);
+    let id = env.register(SplitContract, (deployer.clone(), usdc_token.clone()));
+
+    env.as_contract(&id, || {
+        let instance = env.storage().instance();
+        assert_eq!(instance.get(&admin_key()), Some(deployer));
+        assert_eq!(instance.get(&usdc_token_key()), Some(usdc_token));
+        assert_eq!(instance.get(&initialised_key()), Some(true));
+    });
 }
 
 #[test]
