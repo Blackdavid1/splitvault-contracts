@@ -10084,3 +10084,69 @@ fn test_120_certificate_hash_differs_by_recipient() {
     assert_eq!(id_a, id_b);
     assert_ne!(hash_a, hash_b);
 }
+
+/// Meter the current release WASM in the Soroban test host.
+#[test]
+#[ignore = "requires the release WASM built by the compute budget workflow"]
+fn compute_budget_measurements() {
+    extern crate std;
+
+    let dir = std::env::var("COMPUTE_BUDGET_WASM").expect("set COMPUTE_BUDGET_WASM");
+    let wasm = std::fs::read(dir).expect("read split release WASM");
+
+    for (count, fixture) in [
+        (1, "1-recipient"),
+        (5, "5-recipients"),
+        (20, "20-recipients"),
+    ] {
+        let env = Env::new_with_config(soroban_sdk::testutils::EnvTestConfig {
+            capture_snapshot_at_drop: false,
+        });
+        env.mock_all_auths();
+        env.cost_estimate().disable_resource_limits();
+        env.cost_estimate().budget().reset_unlimited();
+        env.ledger().set_timestamp(1_000);
+
+        let contract_id = env.register(wasm.as_slice(), ());
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        init_contract(&env, &contract_id, &token_id);
+        let client = client(&env, &contract_id);
+        let creator = Address::generate(&env);
+        let payer = Address::generate(&env);
+        let total = i128::from(count) * 100;
+        StellarAssetClient::new(&env, &token_id).mint(&payer, &total);
+
+        let mut recipients = Vec::new(&env);
+        let mut amounts = Vec::new(&env);
+        for _ in 0..count {
+            recipients.push_back(Address::generate(&env));
+            amounts.push_back(100_i128);
+        }
+        let mut options = default_options(&env);
+        options.scheduled_release_at = Some(2_000);
+        let report = |operation: &str| {
+            let instructions = env.cost_estimate().resources().instructions;
+            std::println!("COMPUTE_BUDGET {operation} {fixture} {instructions}");
+        };
+
+        let id =
+            client.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999, &options);
+        report("create_invoice");
+        let half = total / 2;
+        client.set_delegation(&id, &creator, &payer);
+        client.pay_invoice_delegated(&payer, &id, &half, &0, &creator);
+        report("pay_invoice_delegated");
+        client.pay(&payer, &id, &half, &0, &false, &false, &None);
+        report("pay");
+        env.ledger().set_timestamp(2_000);
+        client.release(&id);
+        report("release");
+        assert_eq!(client.get_invoice(&id).status, InvoiceStatus::Released);
+        report("get_invoice");
+        client.get_stats();
+        report("get_stats");
+    }
+}
