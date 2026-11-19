@@ -9155,3 +9155,101 @@ fn test_120_certificate_hash_differs_by_recipient() {
     assert_eq!(id_a, id_b);
     assert_ne!(hash_a, hash_b);
 }
+
+#[test]
+fn test_opt_in_duplicate_payment_window() {
+    let (mut env, contract_id, token_id) = setup();
+    env.set_config(soroban_sdk::testutils::EnvTestConfig {
+        capture_snapshot_at_drop: false,
+    });
+    let admin = init_with_admin(&env, &contract_id, &token_id);
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+
+    env.ledger().set_sequence_number(100);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &500);
+    let id = make_invoice(&env, &c, &creator, &recipient, 500, &token_id, 9_999);
+    c.set_prevent_duplicate_payments(&creator, &id);
+    c.set_duplicate_window_ledgers(&admin, &10);
+
+    c.pay(&payer, &id, &20, &0, &false, &false, &None);
+    assert_eq!(
+        c.try_pay(&payer, &id, &20, &1, &false, &false, &None),
+        Err(Ok(ContractError::DuplicatePayment.into()))
+    );
+    assert_eq!(tk.balance(&payer), 480);
+
+    c.pay(&payer, &id, &21, &1, &false, &false, &None);
+    c.authorise_delegate(&beneficiary, &payer, &40, &5_000);
+    c.delegate_pay(&payer, &beneficiary, &id, &20);
+    assert_eq!(
+        c.try_delegate_pay(&payer, &beneficiary, &id, &20),
+        Err(Ok(ContractError::DuplicatePayment.into()))
+    );
+    assert_eq!(c.get_delegate_credit(&id, &beneficiary), 20);
+
+    env.ledger().set_sequence_number(109);
+    assert_eq!(
+        c.try_pay(&payer, &id, &20, &2, &false, &false, &None),
+        Err(Ok(ContractError::DuplicatePayment.into()))
+    );
+    env.ledger().set_sequence_number(110);
+    c.pay(&payer, &id, &20, &2, &false, &false, &None);
+    c.delegate_pay(&payer, &beneficiary, &id, &20);
+
+    let memo = BytesN::from_array(&env, &[1; 32]);
+    let other_memo = BytesN::from_array(&env, &[2; 32]);
+    c.pay_with_validated_memo(&payer, &id, &memo, &20, &3, &false, &None);
+    assert_eq!(
+        c.try_pay_with_validated_memo(&payer, &id, &memo, &20, &4, &false, &None),
+        Err(Ok(ContractError::DuplicatePayment.into()))
+    );
+    c.pay_with_validated_memo(&payer, &id, &other_memo, &20, &4, &false, &None);
+
+    assert_eq!(c.get_invoice(&id).funded, 141);
+    assert_eq!(c.get_delegate_credit(&id, &beneficiary), 40);
+    assert_eq!(tk.balance(&payer), 359);
+}
+
+#[test]
+fn test_drip_claim_preserves_rounding_dust_across_intervals() {
+    let (mut env, contract_id, token_id) = setup_initialized();
+    env.set_config(soroban_sdk::testutils::EnvTestConfig {
+        capture_snapshot_at_drop: false,
+    });
+    let c = client(&env, &contract_id);
+    let tk = token_client(&env, &token_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let allocation = 1_003;
+    let start = 1_000;
+
+    env.ledger().set_timestamp(start);
+    let id = make_invoice(&env, &c, &creator, &recipient, allocation, &token_id, 9_999);
+
+    // Seed the released escrow state consumed by drip_claim.
+    env.as_contract(&contract_id, || {
+        let mut invoice = load_invoice(&env, id);
+        invoice.status = InvoiceStatus::Released;
+        invoice.drip_duration = Some(100);
+        invoice.release_timestamp = Some(start);
+        invoice.funded = allocation;
+        save_invoice(&env, id, &invoice);
+    });
+    StellarAssetClient::new(&env, &token_id).mint(&contract_id, &allocation);
+
+    let mut claimed = 0;
+    for (elapsed, expected_payout) in [(25, 250), (50, 251), (100, 502)] {
+        env.ledger().set_timestamp(start + elapsed);
+        c.drip_claim(&id, &recipient, &token_id);
+        assert_eq!(tk.balance(&recipient) - claimed, expected_payout);
+        claimed += expected_payout;
+        assert_eq!(c.get_recipient_claimed(&id, &recipient), claimed);
+        assert_eq!(tk.balance(&contract_id), allocation - claimed);
+    }
+    assert_eq!(claimed, allocation);
+}

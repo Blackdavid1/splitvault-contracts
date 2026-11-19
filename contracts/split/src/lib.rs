@@ -1546,12 +1546,12 @@ fn upgrade_checkpoint_key() -> Symbol {
     symbol_short!("upg_ckpt")
 }
 
-/// Issue #431: duplicate payment fingerprint — persistent storage (with TTL).
-// Issue #431: duplicate-payment detection is implemented below but not yet
-// called from the payment path.
-#[allow(dead_code)]
 fn payment_fingerprint_key(fingerprint_hash: &BytesN<32>) -> (Symbol, BytesN<32>) {
     (symbol_short!("dup_fp"), fingerprint_hash.clone())
+}
+
+fn duplicate_prevention_key(invoice_id: u64) -> (Symbol, u64) {
+    (symbol_short!("dup_on"), invoice_id)
 }
 
 /// Issue #431: duplicate window in ledgers — instance storage.
@@ -2815,57 +2815,33 @@ fn compute_memo_dedupe_hash(env: &Env, invoice_id: u64, payer: &Address, memo: u
     env.crypto().sha256(&input).into()
 }
 
-/// Compute payment fingerprint hash: sha256(invoice_id || payer || amount || ledger).
-#[allow(dead_code)]
-fn compute_payment_fingerprint(
+/// Reject a repeated payment intent while its ledger window is active.
+fn prevent_duplicate_payment(
     env: &Env,
     invoice_id: u64,
     payer: &Address,
     amount: i128,
-    ledger: u32,
-) -> BytesN<32> {
-    let mut input = Bytes::new(env);
-    for byte in invoice_id.to_be_bytes().iter() {
-        input.push_back(*byte);
+    reference: Option<Val>,
+) {
+    if !env.storage().persistent().has(&duplicate_prevention_key(invoice_id)) {
+        return;
     }
-    let payer_val: Val = payer.clone().into_val(env);
-    let payer_bytes = payer_val.to_xdr(env);
-    for byte in payer_bytes.iter() {
-        input.push_back(byte);
-    }
-    for byte in amount.to_be_bytes().iter() {
-        input.push_back(*byte);
-    }
-    for byte in ledger.to_be_bytes().iter() {
-        input.push_back(*byte);
-    }
-    env.crypto().sha256(&input).into()
-}
 
-/// Check if payment fingerprint exists (duplicate detection).
-#[allow(dead_code)]
-fn check_duplicate_payment(env: &Env, fingerprint: &BytesN<32>) -> bool {
-    env.storage()
-        .persistent()
-        .has(&payment_fingerprint_key(fingerprint))
-}
+    let intent: Val = (invoice_id, payer.clone(), amount, reference).into_val(env);
+    let fingerprint = env.crypto().sha256(&intent.to_xdr(env)).into();
+    let key = payment_fingerprint_key(&fingerprint);
+    let window = SplitContract::get_duplicate_window_ledgers(env.clone())
+        .min(env.storage().max_ttl());
+    let now = env.ledger().sequence();
+    let storage = env.storage().temporary();
+    if let Some(previous) = storage.get::<_, u32>(&key) {
+        if now.saturating_sub(previous) < window {
+            env.panic_with_error(ContractError::DuplicatePayment);
+        }
+    }
 
-/// Record payment fingerprint with TTL.
-#[allow(dead_code)]
-fn record_payment_fingerprint(env: &Env, fingerprint: &BytesN<32>, current_ledger: u32) {
-    let window_ledgers: u32 = env
-        .storage()
-        .instance()
-        .get(&duplicate_window_ledgers_key())
-        .unwrap_or(DEFAULT_DUPLICATE_WINDOW_LEDGERS);
-    env.storage()
-        .persistent()
-        .set(&payment_fingerprint_key(fingerprint), &current_ledger);
-    env.storage().persistent().extend_ttl(
-        &payment_fingerprint_key(fingerprint),
-        window_ledgers,
-        window_ledgers,
-    );
+    storage.set(&key, &now);
+    storage.extend_ttl(&key, window, window);
 }
 
 // ---------------------------------------------------------------------------
@@ -7179,6 +7155,7 @@ impl SplitContract {
             return;
         }
 
+        prevent_duplicate_payment(&env, invoice_id, &payer, amount, None);
         Self::enforce_invoice_rate_limit(&env, invoice_id, &payer);
         Self::_pay(
             &env,
@@ -9690,10 +9667,8 @@ impl SplitContract {
     /// payment references, etc.) without those values being required to match the
     /// on-chain invoice numeric ID.
     ///
-    /// To prevent accidental replay (e.g. a rebroadcast of a prior transaction),
-    /// the contract records a sha256 hash of `(invoice_id ‖ payer ‖ memo)` in
-    /// persistent storage.  If the same triple is submitted again the call panics
-    /// with "MemoDuplicatePayment".
+    /// On an opted-in invoice, repeated payments with the same payer, amount,
+    /// and memo are rejected within the configured ledger window.
     ///
     /// Requires payer auth and emits a payment_matched event on success.
     pub fn pay_with_memo(
@@ -9713,6 +9688,13 @@ impl SplitContract {
         assert!(
             invoice.status != InvoiceStatus::Deleted,
             "InvoiceDeleted"
+        );
+        prevent_duplicate_payment(
+            &env,
+            invoice_id,
+            &payer,
+            amount,
+            Some(memo.into_val(&env)),
         );
         Self::_pay(
             &env,
@@ -9763,6 +9745,13 @@ impl SplitContract {
         {
             assert!(payment_memo == required, "MemoMismatch");
         }
+        prevent_duplicate_payment(
+            &env,
+            invoice_id,
+            &payer,
+            amount,
+            Some(payment_memo.into_val(&env)),
+        );
         Self::_pay(
             &env,
             &payer,
@@ -10816,6 +10805,7 @@ impl SplitContract {
         let total: i128 = invoice.amounts.iter().sum();
         let n = invoice.recipients.len();
         let mut distributed: i128 = 0;
+        let mut ratio_allocated: i128 = 0;
         let mut total_fee: i128 = 0;
         let mut total_tax: i128 = 0;
         let mut surplus_total: i128 = 0;
@@ -10878,12 +10868,15 @@ impl SplitContract {
             let proportional = if !invoice.ratios.is_empty() {
                 let ratio = invoice.ratios.get(i).unwrap();
                 let denom = invoice.ratio_denominator as u128;
-                let r = ratio as u128;
-                // Issue #54: apportion the *funded* pool by ratio, not the
-                // per-recipient target amount.  Using `amount` here caused
-                // recipients to receive only (amount × ratio/denom) instead of
-                // the correct (funded × ratio/denom).
-                checked_proportion(funded as u128, r, denom).expect("ArithmeticOverflow")
+                let share = if paid_set.is_empty() && i == n - 1 && invoice.ratios.len() == n {
+                    // Assign rounding dust before caps and locks are applied.
+                    distributable - ratio_allocated
+                } else {
+                    checked_proportion(distributable as u128, ratio as u128, denom)
+                        .expect("ArithmeticOverflow")
+                };
+                ratio_allocated += share;
+                share
             } else if !invoice.split_rules.is_empty() {
                 let rule = invoice.split_rules.get(i).unwrap();
                 match rule {
@@ -14212,6 +14205,14 @@ impl SplitContract {
         let remaining = total - invoice.funded;
         assert!(amount <= remaining, "payment exceeds remaining balance");
 
+        prevent_duplicate_payment(
+            &env,
+            invoice_id,
+            &delegate,
+            amount,
+            Some(beneficiary.clone().into_val(&env)),
+        );
+
         delegation.allowance -= amount;
         delegates.set(delegate.clone(), delegation);
         env.storage()
@@ -16060,11 +16061,32 @@ impl SplitContract {
     // Issue #431: Duplicate payment detection
     // -----------------------------------------------------------------------
 
+    /// Opt a pending invoice into duplicate payment detection.
+    /// Direct payments are grouped by payer and amount. Delegated payments
+    /// also distinguish beneficiaries, and memo gateways distinguish memos.
+    /// A fresh transaction nonce does not change the payment intent.
+    pub fn set_prevent_duplicate_payments(env: Env, creator: Address, invoice_id: u64) {
+        require_not_paused(&env);
+        creator.require_auth();
+        let invoice = load_invoice(&env, invoice_id);
+        if invoice.creator != creator {
+            env.panic_with_error(ContractError::NotAuthorized);
+        }
+        if invoice.status != InvoiceStatus::Pending {
+            env.panic_with_error(ContractError::InvalidStatus);
+        }
+        env.storage()
+            .persistent()
+            .set(&duplicate_prevention_key(invoice_id), &true);
+    }
+
     /// Set the duplicate payment detection window (ledgers). Admin-only.
     pub fn set_duplicate_window_ledgers(env: Env, admin: Address, window_ledgers: u32) {
         require_admin_role(&env, &admin, AdminRole::SuperAdmin);
         assert!(
-            window_ledgers > 0 && window_ledgers <= 1_000_000,
+            window_ledgers > 0
+                && window_ledgers <= 1_000_000
+                && window_ledgers <= env.storage().max_ttl(),
             "invalid window size"
         );
         env.storage()
