@@ -1260,7 +1260,7 @@ fn maybe_record_created(env: &Env, creator: &Address, total: i128) {
         let _: Val = env.invoke_contract(
             &dashboard,
             &Symbol::new(env, "record_created"),
-            (creator.clone(), total).into_val(env),
+            (env.current_contract_address(), creator.clone(), total).into_val(env),
         );
     }
 }
@@ -1274,7 +1274,7 @@ fn maybe_record_released(env: &Env, creator: &Address, amount: i128) {
         let _: Val = env.invoke_contract(
             &dashboard,
             &Symbol::new(env, "record_released"),
-            (creator.clone(), amount).into_val(env),
+            (env.current_contract_address(), creator.clone(), amount).into_val(env),
         );
     }
 }
@@ -2672,7 +2672,7 @@ fn maybe_record_refunded(env: &Env, creator: &Address, amount: i128) {
         let _: Val = env.invoke_contract(
             &dashboard,
             &Symbol::new(env, "record_refunded"),
-            (creator.clone(), amount).into_val(env),
+            (env.current_contract_address(), creator.clone(), amount).into_val(env),
         );
     }
 }

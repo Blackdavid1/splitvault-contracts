@@ -202,6 +202,83 @@ fn test_create_invoice() {
 }
 
 #[test]
+fn test_dashboard_only_records_registered_split_calls() {
+    use dashboard::{DashboardContract, DashboardContractClient};
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+    use soroban_sdk::IntoVal;
+
+    let (env, registered, token_id) = setup();
+    let admin = init_with_admin(&env, &registered, &token_id);
+    let other = env.register(SplitContract, ());
+    let other_admin = init_with_admin(&env, &other, &token_id);
+    let dashboard_id = env.register(DashboardContract, ());
+    let dashboard = DashboardContractClient::new(&env, &dashboard_id);
+    dashboard.initialize(&admin, &registered);
+    client(&env, &registered).set_dashboard_contract(&admin, &dashboard_id);
+    client(&env, &other).set_dashboard_contract(&other_admin, &dashboard_id);
+    env.mock_auths(&[]);
+    env.ledger().set_timestamp(1_000);
+
+    let creator = Address::generate(&env);
+    let recipients = soroban_sdk::vec![&env, Address::generate(&env)];
+    let amounts = soroban_sdk::vec![&env, 100_i128];
+    let deadline = 2_000;
+    let options = default_options(&env);
+
+    let create = |split: &Address| {
+        // Mock only the creator. The dashboard must authenticate the actual
+        // invoking Split contract through Soroban's invoker authorization.
+        client(&env, split)
+            .mock_auths(&[MockAuth {
+                address: &creator,
+                invoke: &MockAuthInvoke {
+                    contract: split,
+                    fn_name: "create_invoice",
+                    args: (
+                        &creator,
+                        &recipients,
+                        &amounts,
+                        &token_id,
+                        deadline,
+                        &options,
+                    )
+                        .into_val(&env),
+                    sub_invokes: &[],
+                },
+            }])
+            .try_create_invoice(
+                &creator,
+                &recipients,
+                &amounts,
+                &token_id,
+                &deadline,
+                &options,
+            )
+    };
+
+    assert!(matches!(create(&registered), Ok(Ok(_))));
+    let initial = dashboard.get_creator_dashboard(&creator);
+    assert_eq!(initial.invoice_count, 1);
+    assert_eq!(initial.total_volume, 100);
+    assert!(create(&other).is_err());
+    assert_eq!(dashboard.get_creator_dashboard(&creator), initial);
+
+    assert!(dashboard.try_revoke_split_contract(&registered).is_err());
+    dashboard.mock_all_auths().register_split_contract(&other);
+    dashboard
+        .mock_all_auths()
+        .revoke_split_contract(&registered);
+    env.mock_auths(&[]);
+
+    assert!(!dashboard.is_authorized_split_contract(&registered));
+    assert!(dashboard.is_authorized_split_contract(&other));
+    assert!(create(&registered).is_err());
+    assert_eq!(dashboard.get_creator_dashboard(&creator), initial);
+    assert!(matches!(create(&other), Ok(Ok(_))));
+    assert_eq!(dashboard.get_creator_dashboard(&creator).invoice_count, 2);
+}
+
+#[test]
 fn test_pay_and_auto_release() {
     let (env, contract_id, token_id) = setup_initialized();
     let c = client(&env, &contract_id);
