@@ -4,11 +4,6 @@
 //! events. Metrics are stored per creator so the frontend can render a
 //! dashboard without scanning the full invoice history.
 
-#![no_std]
-
-#[cfg(test)]
-mod test;
-
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol};
 
 #[contracttype]
@@ -34,34 +29,39 @@ fn creator_dashboard_key(creator: &Address) -> (Symbol, Address) {
     (symbol_short!("cr_dash"), creator.clone())
 }
 
-fn is_authorized_split_contract(env: &Env, producer: &Address) -> bool {
+fn is_authorized_split_contract(env: &Env, caller: &Address) -> bool {
     env.storage()
         .instance()
-        .get(&authorized_contract_key(producer))
+        .get(&authorized_contract_key(caller))
         .unwrap_or(false)
 }
 
-fn require_authorized_split_contract(env: &Env, producer: &Address) {
+fn require_authorized_split_contract(env: &Env, caller: &Address) {
     assert!(
-        is_authorized_split_contract(env, producer),
+        is_authorized_split_contract(env, caller),
         "unauthorized split contract"
     );
-    producer.require_auth();
+    caller.require_auth();
 }
 
-fn require_admin(env: &Env) {
+fn require_admin(env: &Env) -> Address {
     let admin: Address = env
         .storage()
         .instance()
         .get(&admin_key())
         .expect("not initialized");
     admin.require_auth();
+    admin
 }
 
 /// Publish a structured event when a creator's created-invoice metrics update.
 fn dashboard_record_created(env: &Env, creator: &Address, invoice_count: u64, total_volume: i128) {
     env.events().publish(
-        (symbol_short!("dash"), symbol_short!("created"), creator.clone()),
+        (
+            symbol_short!("dash"),
+            symbol_short!("created"),
+            creator.clone(),
+        ),
         (invoice_count, total_volume),
     );
 }
@@ -74,7 +74,11 @@ fn dashboard_record_released(
     released_volume: i128,
 ) {
     env.events().publish(
-        (symbol_short!("dash"), symbol_short!("released"), creator.clone()),
+        (
+            symbol_short!("dash"),
+            symbol_short!("released"),
+            creator.clone(),
+        ),
         (released_count, released_volume),
     );
 }
@@ -82,7 +86,11 @@ fn dashboard_record_released(
 /// Publish a structured event when a creator's refunded-invoice count updates.
 fn dashboard_record_refunded(env: &Env, creator: &Address, refunded_count: u64) {
     env.events().publish(
-        (symbol_short!("dash"), symbol_short!("refunded"), creator.clone()),
+        (
+            symbol_short!("dash"),
+            symbol_short!("refunded"),
+            creator.clone(),
+        ),
         refunded_count,
     );
 }
@@ -232,8 +240,8 @@ impl DashboardContract {
     }
 
     /// Record a refunded invoice for `creator`.
-    pub fn record_refunded(env: Env, producer: Address, creator: Address, total: i128) {
-        require_authorized_split_contract(&env, &producer);
+    pub fn record_refunded(env: Env, creator: Address, total: i128) {
+        require_authorized_split_contract(&env, &env.current_contract_address());
 
         let key = creator_dashboard_key(&creator);
         let mut dashboard: CreatorDashboard =
