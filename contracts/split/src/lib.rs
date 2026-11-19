@@ -16313,8 +16313,9 @@ impl SplitContract {
         let storage = env.storage().persistent();
         let instance = env.storage().instance();
         let core_key = invoice_key(invoice_id);
+        let has_legacy_core = instance.has(&core_key);
         assert!(
-            storage.has(&core_key) || instance.has(&core_key),
+            storage.has(&core_key) || has_legacy_core,
             "invoice not found"
         );
 
@@ -16359,7 +16360,7 @@ impl SplitContract {
             }
         }
 
-        if instance.has(&core_key) || instance.has(&invoice_hot_key(invoice_id)) {
+        if has_legacy_core || instance.has(&invoice_hot_key(invoice_id)) {
             instance.extend_ttl(threshold, max_ttl);
         }
     }
