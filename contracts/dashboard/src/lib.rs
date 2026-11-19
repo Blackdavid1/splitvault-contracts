@@ -164,8 +164,10 @@ impl DashboardContract {
         is_authorized_split_contract(&env, &caller)
     }
 
-    pub fn record_created(env: Env, creator: Address, total: i128) {
-        require_authorized_split_contract(&env, &env.current_contract_address());
+    /// Record a created invoice. A zero amount increments the count without adding volume.
+    pub fn record_created(env: Env, producer: Address, creator: Address, total: i128) {
+        require_authorized_split_contract(&env, &producer);
+        assert!(total >= 0, "negative dashboard amount");
 
         let key = creator_dashboard_key(&creator);
         let mut dashboard: CreatorDashboard =
@@ -200,8 +202,10 @@ impl DashboardContract {
         );
     }
 
-    pub fn record_released(env: Env, creator: Address, total: i128) {
-        require_authorized_split_contract(&env, &env.current_contract_address());
+    /// Record a release. A zero amount increments the count without adding volume.
+    pub fn record_released(env: Env, producer: Address, creator: Address, total: i128) {
+        require_authorized_split_contract(&env, &producer);
+        assert!(total >= 0, "negative dashboard amount");
 
         let key = creator_dashboard_key(&creator);
         let mut dashboard: CreatorDashboard =

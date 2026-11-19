@@ -328,6 +328,23 @@ fn test_create_invoice_invalid_amount() {
     assert_eq!(result, Err(Ok(Error::InvalidTotalAmount)));
 }
 
+#[test]
+fn test_create_invoice_deadline_boundary() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let token = Address::generate(&env);
+    client.initialize(&Address::generate(&env));
+    env.ledger().with_mut(|ledger| ledger.timestamp = 100);
+
+    assert_eq!(
+        client.try_create_invoice(&creator, &token, &1, &99),
+        Err(Ok(Error::DeadlinePassed))
+    );
+    assert_eq!(client.create_invoice(&creator, &token, &1, &100), 0);
+    assert_eq!(client.create_invoice(&creator, &token, &1, &101), 1);
+}
+
 // ---------------------------------------------------------------------------
 // deposit
 // ---------------------------------------------------------------------------
@@ -453,6 +470,37 @@ fn test_deposit_at_minimum_succeeds() {
     client.deposit(&payer, &id, &1_000_000);
     let invoice = client.get_invoice(&id);
     assert_eq!(invoice.funded_amount, 1_000_000);
+}
+
+#[test]
+fn test_deposit_below_minimum_can_close_remaining_balance() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token = create_token(&env, &token_admin);
+    let deadline = env.ledger().timestamp() + 10;
+    mint(&env, &token, &token_admin, &payer, 1_000_020);
+    client.initialize(&Address::generate(&env));
+
+    for (total, first_deposit) in [(10, None), (1_000_010, Some(1_000_000))] {
+        let id = client.create_invoice(&creator, &token, &total, &deadline);
+        if let Some(amount) = first_deposit {
+            client.deposit(&payer, &id, &amount);
+        }
+        let before = client.get_invoice(&id);
+        assert_eq!(total - before.funded_amount, 10);
+        assert_eq!(
+            client.try_deposit(&payer, &id, &9),
+            Err(Ok(Error::DepositTooSmall))
+        );
+        assert_eq!(client.get_invoice(&id).funded_amount, before.funded_amount);
+        client.deposit(&payer, &id, &10);
+        assert_eq!(client.get_invoice(&id).status, EscrowStatus::Released);
+    }
+
+    assert_eq!(token::Client::new(&env, &token).balance(&creator), 1_000_020);
 }
 
 // ---------------------------------------------------------------------------
@@ -932,8 +980,31 @@ fn test_release_emits_escrow_released_event() {
                 }
             }
         }
+
+        let events = env.events().all().filter_by_contract(&contract_id);
+        let legacy_topics: soroban_sdk::Vec<Val> =
+            (symbol_short!("escrow"), symbol_short!("released"), invoice_id).into_val(&env);
+        let structured_topics: soroban_sdk::Vec<Val> =
+            (symbol_short!("escrow"), symbol_short!("released")).into_val(&env);
+        let mut releases = events.events().iter().filter_map(|event| {
+            let topics = xdr_event_topics(&env, event)?;
+            let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
+            let data = Val::try_from_val(&env, &body.data).ok()?;
+            (topics == legacy_topics || topics == structured_topics).then_some((topics, data))
+        });
+
+        let (topics, data) = releases.next().expect("legacy release event");
+        assert_eq!(topics, legacy_topics);
+        assert_eq!(i128::try_from_val(&env, &data).unwrap(), total);
+
+        let (topics, data) = releases.next().expect("structured release event");
+        assert_eq!(topics, structured_topics);
+        let event = EscrowReleased::try_from_val(&env, &data).unwrap();
+        assert_eq!(event.invoice_id, invoice_id);
+        assert_eq!(event.recipient, creator);
+        assert_eq!(event.amount, total);
+        assert!(releases.next().is_none());
     }
-    assert!(found, "EscrowReleased event was not emitted during release");
 }
 
 // ---------------------------------------------------------------------------
