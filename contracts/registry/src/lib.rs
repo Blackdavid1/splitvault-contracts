@@ -108,6 +108,54 @@ pub fn pause_changed(env: &Env, paused: bool) {
 }
 
 // ---------------------------------------------------------------------------
+// Shared removal bookkeeping
+// ---------------------------------------------------------------------------
+
+/// Perform the successful-removal mutation shared by both deregister entry
+/// points: scan the creator's list, rewrite (or drop) it, clear the
+/// duplicate-registration flag, and emit the discovery event.
+///
+/// Callers are responsible for auth and for their own missing-entry semantics
+/// before invoking this helper.
+fn remove_registration(env: &Env, creator: &Address, contract: &Address) {
+    let contracts_key = creator_contracts_key(creator);
+    let registration_check_key = registration_key(creator, contract);
+
+    let contracts: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&contracts_key)
+        .unwrap_or_else(|| Vec::new(env));
+
+    let mut remaining: Vec<Address> = Vec::new(env);
+    let mut i = 0;
+    while i < contracts.len() {
+        let entry = contracts.get_unchecked(i);
+        if entry != *contract {
+            remaining.push_back(entry);
+        }
+        i += 1;
+    }
+
+    if remaining.is_empty() {
+        // Final removal: drop the list entirely so no rent-bearing empty
+        // entry lingers. A later registration reconstructs it fresh.
+        env.storage().persistent().remove(&contracts_key);
+    } else {
+        env.storage().persistent().set(&contracts_key, &remaining);
+        env.storage()
+            .persistent()
+            .extend_ttl(&contracts_key, REGISTRY_MIN_TTL, REGISTRY_MAX_TTL);
+    }
+
+    env.storage()
+        .persistent()
+        .remove(&registration_check_key);
+
+    contract_deregistered(env, creator, contract);
+}
+
+// ---------------------------------------------------------------------------
 // Contract
 // ---------------------------------------------------------------------------
 
@@ -180,45 +228,12 @@ impl Registry {
             .expect("not initialized");
         admin.require_auth();
 
-        let contracts_key = creator_contracts_key(&creator);
         let registration_check_key = registration_key(&creator, &contract);
-
         if !env.storage().persistent().has(&registration_check_key) {
             return;
         }
 
-        let contracts: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&contracts_key)
-            .unwrap_or_else(|| Vec::new(&env));
-
-        let mut remaining: Vec<Address> = Vec::new(&env);
-        let mut i = 0;
-        while i < contracts.len() {
-            let entry = contracts.get_unchecked(i);
-            if entry != contract {
-                remaining.push_back(entry);
-            }
-            i += 1;
-        }
-
-        if remaining.is_empty() {
-            // Final removal: drop the list entirely so no rent-bearing empty
-            // entry lingers. A later registration reconstructs it fresh.
-            env.storage().persistent().remove(&contracts_key);
-        } else {
-            env.storage().persistent().set(&contracts_key, &remaining);
-            env.storage()
-                .persistent()
-                .extend_ttl(&contracts_key, REGISTRY_MIN_TTL, REGISTRY_MAX_TTL);
-        }
-
-        env.storage()
-            .persistent()
-            .remove(&registration_check_key);
-
-        contract_deregistered(&env, &creator, &contract);
+        remove_registration(&env, &creator, &contract);
     }
 
     /// Deregister a decommissioned contract from the caller's registry.
@@ -232,126 +247,11 @@ impl Registry {
     pub fn deregister(env: Env, creator: Address, contract: Address) {
         creator.require_auth();
 
-        let contracts_key = creator_contracts_key(&creator);
         let registration_check_key = registration_key(&creator, &contract);
-
         assert!(
             env.storage().persistent().has(&registration_check_key),
             "not registered"
         );
 
-        let contracts: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&contracts_key)
-            .unwrap_or_else(|| Vec::new(&env));
-
-        let mut remaining: Vec<Address> = Vec::new(&env);
-        let mut i = 0;
-        while i < contracts.len() {
-            let entry = contracts.get_unchecked(i);
-            if entry != contract {
-                remaining.push_back(entry);
-            }
-            i += 1;
-        }
-
-        if remaining.is_empty() {
-            env.storage().persistent().remove(&contracts_key);
-        } else {
-            env.storage().persistent().set(&contracts_key, &remaining);
-            env.storage()
-                .persistent()
-                .extend_ttl(&contracts_key, REGISTRY_MIN_TTL, REGISTRY_MAX_TTL);
-        }
-
-        env.storage()
-            .persistent()
-            .remove(&registration_check_key);
-
-        contract_deregistered(&env, &creator, &contract);
+        remove_registration(&env, &creator, &contract);
     }
-
-    /// Register a deployed split contract under the caller's address.
-    ///
-    /// Requires the `creator` to authenticate. Rejects non-contract (account)
-    /// addresses so only deployed contracts become discoverable, then appends
-    /// `contract` to the creator's list and emits a [`contract_registered`]
-    /// discovery event.
-    ///
-    /// # Panics
-    /// * `"registry paused"` — registrations are currently paused.
-    /// * `"not a contract address"` — `contract` is an account, not a contract.
-    /// * `"already registered"` — `contract` is already in the creator's list.
-    /// * `"too many contracts"` — the per-creator cap has been reached.
-    pub fn register(env: Env, creator: Address, contract: Address) {
-        creator.require_auth();
-
-        assert!(!Self::is_paused(env.clone()), "registry paused");
-
-        // Reject account addresses: only deployed contracts may be indexed.
-        assert!(
-            contract.executable(),
-            "not a contract address"
-        );
-
-        let contracts_key = creator_contracts_key(&creator);
-        let registration_check_key = registration_key(&creator, &contract);
-
-        assert!(
-            !env.storage().persistent().has(&registration_check_key),
-            "already registered"
-        );
-
-        let mut contracts: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&contracts_key)
-            .unwrap_or_else(|| Vec::new(&env));
-
-        assert!(
-            contracts.len() < MAX_CONTRACTS_PER_CREATOR,
-            "too many contracts"
-        );
-
-        contracts.push_back(contract.clone());
-        env.storage().persistent().set(&contracts_key, &contracts);
-        env.storage()
-            .persistent()
-            .extend_ttl(&contracts_key, REGISTRY_MIN_TTL, REGISTRY_MAX_TTL);
-
-        env.storage()
-            .persistent()
-            .set(&registration_check_key, &true);
-        env.storage().persistent().extend_ttl(
-            &registration_check_key,
-            REGISTRY_MIN_TTL,
-            REGISTRY_MAX_TTL,
-        );
-
-        let count_key = creator_contract_count_key(&creator);
-        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-        env.storage().persistent().set(&count_key, &(count + 1));
-        env.storage()
-            .persistent()
-            .extend_ttl(&count_key, REGISTRY_MIN_TTL, REGISTRY_MAX_TTL);
-
-        contract_registered(&env, &creator, &contract);
-    }
-
-    /// Return all contracts registered by `creator`.
-    pub fn get_contracts(env: Env, creator: Address) -> Vec<Address> {
-        env.storage()
-            .persistent()
-            .get(&creator_contracts_key(&creator))
-            .unwrap_or_else(|| Vec::new(&env))
-    }
-
-    /// Return the number of contracts registered by `creator`.
-    pub fn get_contract_count(env: Env, creator: Address) -> u32 {
-        env.storage()
-            .persistent()
-            .get(&creator_contract_count_key(&creator))
-            .unwrap_or(0)
-    }
-}
