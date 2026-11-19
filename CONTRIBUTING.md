@@ -43,6 +43,9 @@ git checkout -b fix/issue-42-short-description
 - Run `cargo test --workspace` and ensure all tests pass.
 - Run `cargo clippy --workspace --locked -- -D clippy::dbg_macro`. Compiler errors and denied lints (including `clippy::dbg_macro`) block CI. Other warnings are advisory.
 - Run `cargo fmt` to format your code.
+- See [CI replay and size reports](docs/CI_REPLAY.md) for the CI checklist,
+  fuzz failure replay, and release WASM comparisons, and
+  [factory fixture provenance](docs/FACTORY_FIXTURE.md) before updating its WASM.
 
 ### 4. Commit
 
