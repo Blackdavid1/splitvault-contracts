@@ -3639,6 +3639,7 @@ fn test_archiving_twenty_invoices_keeps_invoice_data_out_of_instance_storage() {
                 audit_log_key(id),
                 created_ledger_key(id),
                 archive_marker_key(id),
+                milestone_flags_key(id),
             ] {
                 assert!(!instance.has(&key));
             }
@@ -3651,6 +3652,7 @@ fn test_archiving_twenty_invoices_keeps_invoice_data_out_of_instance_storage() {
         assert!(c.is_archived(&id));
         assert_eq!(c.get_archived_invoice(&id).status, InvoiceStatus::Released);
         assert_eq!(c.get_invoice_payment_count(&id), 1);
+        assert_eq!(c.get_milestone_flags(&id), 0b1111);
     }
 }
 

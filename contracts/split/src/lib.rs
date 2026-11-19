@@ -264,7 +264,7 @@ fn paid_flags_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("paid_flg"), id)
 }
 
-/// Issue #333: u8 bitmask of milestones already emitted — instance storage.
+/// Issue #333: milestone bitmask, cached in instance storage until archival.
 /// Bit 0 = 25 %, Bit 1 = 50 %, Bit 2 = 75 %, Bit 3 = 100 %.
 fn milestone_flags_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("ms_flgs"), id)
@@ -1733,6 +1733,7 @@ fn bump_invoice_entry_ttl(env: &Env, id: u64) {
         invoice_ext2_key(id),
         invoice_compact_key(id),
         archive_marker_key(id),
+        milestone_flags_key(id),
     ] {
         if storage.has(&key) {
             storage.extend_ttl(&key, threshold, extend_to);
@@ -1745,8 +1746,15 @@ fn bump_invoice_entry_ttl(env: &Env, id: u64) {
 // ---------------------------------------------------------------------------
 
 fn archive_invoice_storage(env: &Env, id: u64) {
-    env.storage().persistent().set(&archive_marker_key(id), &true);
-    env.storage().instance().remove(&invoice_hot_key(id));
+    let instance = env.storage().instance();
+    let persistent = env.storage().persistent();
+    let milestone_key = milestone_flags_key(id);
+    if let Some(flags) = instance.get::<_, u32>(&milestone_key) {
+        persistent.set(&milestone_key, &flags);
+        instance.remove(&milestone_key);
+    }
+    persistent.set(&archive_marker_key(id), &true);
+    instance.remove(&invoice_hot_key(id));
     bump_invoice_entry_ttl(env, id);
 }
 
@@ -15396,10 +15404,12 @@ impl SplitContract {
     ///
     /// Returns 0 when no milestones have been crossed yet.
     pub fn get_milestone_flags(env: Env, invoice_id: u64) -> u32 {
+        let key = milestone_flags_key(invoice_id);
         env.storage()
             .instance()
-            .get(&milestone_flags_key(invoice_id))
-            .unwrap_or(0u32)
+            .get(&key)
+            .or_else(|| env.storage().persistent().get(&key))
+            .unwrap_or(0)
     }
 
     // -----------------------------------------------------------------------
@@ -16330,6 +16340,7 @@ impl SplitContract {
             created_ledger_key(invoice_id),
             audit_log_key(invoice_id),
             archive_marker_key(invoice_id),
+            milestone_flags_key(invoice_id),
             metadata_hash_key(invoice_id),
             recipients_list_key(invoice_id),
             amounts_list_key(invoice_id),
