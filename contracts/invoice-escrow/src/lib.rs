@@ -463,14 +463,14 @@ impl InvoiceEscrowContract {
             release_lock(&env);
             return Err(Error::DeadlinePassed);
         }
-        let new_funded = invoice
+        let Some(new_funded) = invoice
             .funded_amount
             .checked_add(amount)
-            .expect("funded_amount overflow");
-        if new_funded > invoice.total_amount {
+            .filter(|&total| total <= invoice.total_amount)
+        else {
             release_lock(&env);
             return Err(Error::OverFunded);
-        }
+        };
 
         // Pull funds from payer into the contract.
         let token_client = token::Client::new(&env, &invoice.token);

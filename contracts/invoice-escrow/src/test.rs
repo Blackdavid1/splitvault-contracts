@@ -1021,3 +1021,31 @@ fn test_appeal_after_ledger_window_fails() {
     let result = client.try_submit_appeal(&payer, &0u64, &appeal);
     assert_eq!(result, Err(Ok(Error::AppealWindowExpired)));
 }
+
+#[test]
+fn test_deposit_overflow_returns_overfunded_without_mutation() {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let token = create_token(&env, &admin);
+    mint(&env, &token, &admin, &payer, 5_000_000);
+
+    client.initialize(&admin);
+    let id = client.create_invoice(&creator, &token, &10_000_000, &10_000);
+    client.deposit(&payer, &id, &1_000_000);
+
+    assert_eq!(
+        client.try_deposit(&payer, &id, &i128::MAX),
+        Err(Ok(Error::OverFunded))
+    );
+    let invoice = client.get_invoice(&id);
+    assert_eq!(invoice.funded_amount, 1_000_000);
+    assert_eq!(invoice.status, EscrowStatus::Active);
+    assert_eq!(client.get_deposit(&id, &payer), 1_000_000);
+    let balances = token::Client::new(&env, &token);
+    assert_eq!(balances.balance(&payer), 4_000_000);
+    assert_eq!(balances.balance(&contract_id), 1_000_000);
+    assert_eq!(balances.balance(&creator), 0);
+}

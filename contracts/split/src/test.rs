@@ -9155,3 +9155,171 @@ fn test_120_certificate_hash_differs_by_recipient() {
     assert_eq!(id_a, id_b);
     assert_ne!(hash_a, hash_b);
 }
+
+#[test]
+#[should_panic(expected = "contract is frozen for upgrade")]
+fn test_execute_upgrade_rejects_frozen_contract() {
+    let (env, contract_id, token_id) = setup();
+    let admin = init_with_admin(&env, &contract_id, &token_id);
+    let c = client(&env, &contract_id);
+    let hash = BytesN::from_array(&env, &[1; 32]);
+
+    c.propose_upgrade(&admin, &hash);
+    env.ledger()
+        .set_timestamp(c.get_upgrade_proposal().unwrap().eligible_at);
+    c.freeze_for_upgrade(&admin, &hash);
+    c.execute_upgrade();
+}
+
+#[test]
+#[should_panic(expected = "upgrade proposal expired")]
+fn test_execute_upgrade_rejects_expired_proposal() {
+    let (env, contract_id, token_id) = setup();
+    let admin = init_with_admin(&env, &contract_id, &token_id);
+    let c = client(&env, &contract_id);
+    c.propose_upgrade(&admin, &BytesN::from_array(&env, &[1; 32]));
+    let eligible_at = c.get_upgrade_proposal().unwrap().eligible_at;
+    env.ledger()
+        .set_timestamp(eligible_at + UPGRADE_EXECUTION_WINDOW_SECS + 1);
+    c.execute_upgrade();
+}
+
+#[test]
+fn test_execute_upgrade_accepts_proposal_at_expiration_boundary() {
+    let (env, contract_id, token_id) = setup();
+    let admin = init_with_admin(&env, &contract_id, &token_id);
+    let c = client(&env, &contract_id);
+
+    // Minimal Wasm v1 module with a Soroban interface metadata custom section.
+    let mut wasm = Bytes::from_slice(&env, b"\0asm\x01\0\0\0\0\x1e\x11contractenvmetav0");
+    wasm.extend_from_slice(&0u32.to_be_bytes()); // XDR interface-version discriminant
+    wasm.extend_from_slice(&env.ledger().protocol_version().to_be_bytes());
+    wasm.extend_from_slice(&0u32.to_be_bytes()); // Interface pre-release version
+    let hash = env.deployer().upload_contract_wasm(wasm);
+
+    c.propose_upgrade(&admin, &hash);
+    let eligible_at = c.get_upgrade_proposal().unwrap().eligible_at;
+    env.ledger()
+        .set_timestamp(eligible_at + UPGRADE_EXECUTION_WINDOW_SECS);
+    c.execute_upgrade();
+
+    assert!(env.events().all().events().iter().any(|event| {
+        xdr_event_topics(&env, event).is_some_and(|topics| topic1_is(&env, &topics, "upg_exec"))
+    }));
+    env.as_contract(&contract_id, || {
+        assert!(!env.storage().instance().has(&upgrade_proposal_key()));
+    });
+}
+
+#[test]
+fn test_subscription_advances_through_all_cycles_and_charges_fees() {
+    use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+
+    let (env, contract_id, token_id) = setup();
+    let c = client(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let treasury = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let fee = 10_i128;
+    let amount = 100_i128;
+    c.initialize(&admin, &fee, &treasury, &token_id, &0, &None, &0, &0, &0);
+    c.set_max_open_invoices(&admin, &1);
+    let asset = StellarAssetClient::new(&env, &token_id);
+    asset.mint(&creator, &(3 * fee));
+    asset.mint(&payer, &(3 * amount));
+
+    let first_id = c.create_subscription(
+        &creator,
+        &soroban_sdk::vec![&env, recipient.clone()],
+        &soroban_sdk::vec![&env, amount],
+        &token_id,
+        &3,
+        &Some(7),
+    );
+    let tokens = token_client(&env, &token_id);
+    tokens.approve(&creator, &contract_id, &(2 * fee), &100);
+    let first_deadline = c.get_invoice(&first_id).deadline;
+    let interval = 7 * 24 * 60 * 60;
+
+    for cycle in 1u32..=3 {
+        let id = first_id + u64::from(cycle - 1);
+        assert_eq!(
+            c.get_invoice(&id).deadline,
+            first_deadline + u64::from(cycle - 1) * interval
+        );
+        // Only the payer signs. The creator's fee comes from the approved allowance.
+        c.mock_auths(&[MockAuth {
+            address: &payer,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "pay",
+                args: (&payer, id, amount, 0_u64, false, false, None::<BytesN<32>>).into_val(&env),
+                sub_invokes: &[MockAuthInvoke {
+                    contract: &token_id,
+                    fn_name: "transfer",
+                    args: (&payer, &contract_id, amount).into_val(&env),
+                    sub_invokes: &[],
+                }],
+            },
+        }])
+        .pay(&payer, &id, &amount, &0, &false, &false, &None);
+
+        // Inspect the events from the payment before another invocation.
+        if cycle < 3 {
+            assert!(env.events().all().events().iter().any(|event| {
+                xdr_event_topics(&env, event)
+                    .is_some_and(|topics| topic1_is(&env, &topics, "subscription_cycle_advanced"))
+            }));
+        }
+        assert!(c.get_invoice(&id).status == InvoiceStatus::Released);
+        env.as_contract(&contract_id, || {
+            let storage = env.storage().persistent();
+            assert!(!storage.has(&subscription_params_key(id)));
+            let open: u32 = storage.get(&open_invoice_count_key(&creator)).unwrap();
+            if cycle < 3 {
+                assert_eq!(open, 1);
+                assert!(storage.has(&subscription_params_key(id + 1)));
+                assert_eq!(
+                    storage.get(&subscription_cycle_key(id + 1)),
+                    Some((cycle + 1, 3u32))
+                );
+            } else {
+                assert_eq!(open, 0);
+                assert_eq!(storage.get::<_, u64>(&counter_key()), Some(id));
+            }
+        });
+    }
+    assert_eq!(tokens.balance(&treasury), 3 * fee);
+    assert_eq!(tokens.balance(&creator), 0);
+    assert_eq!(tokens.balance(&recipient), 3 * amount);
+}
+
+#[test]
+fn test_subscription_successor_respects_creator_quota() {
+    let (env, contract_id, token_id) = setup();
+    let admin = init_with_admin(&env, &contract_id, &token_id);
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipients = soroban_sdk::vec![&env, Address::generate(&env)];
+    let amounts = soroban_sdk::vec![&env, 100_i128];
+    let id = c.create_subscription(&creator, &recipients, &amounts, &token_id, &3, &None);
+    c.create_subscription(&creator, &recipients, &amounts, &token_id, &1, &None);
+    c.create_subscription(&creator, &recipients, &amounts, &token_id, &1, &None);
+    c.set_max_open_invoices(&admin, &2);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &100);
+    let result = c.try_pay(&payer, &id, &100, &0, &false, &false, &None);
+    assert_eq!(
+        result,
+        Err(Ok(ContractError::CreatorInvoiceLimitReached.into()))
+    );
+    assert_eq!(c.get_invoice(&id).funded, 0);
+    assert_eq!(token_client(&env, &token_id).balance(&payer), 100);
+    env.as_contract(&contract_id, || {
+        let storage = env.storage().persistent();
+        assert_eq!(storage.get::<_, u64>(&counter_key()), Some(id + 2));
+        assert!(storage.has(&subscription_params_key(id)));
+    });
+}

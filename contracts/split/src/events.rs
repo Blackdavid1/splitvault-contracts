@@ -27,7 +27,7 @@
 
 use crate::storage_keys::ev_seq_key;
 use crate::types::{DisputeOutcome, FeeSplit, InvoicePhase, InvoiceStatus, OverfundingPolicy, RepScore, TimelockAction};
-use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Vec};
+use soroban_sdk::{contracttype, symbol_short, Address, BytesN, Env, String, Symbol, Vec};
 
 // ---------------------------------------------------------------------------
 // Event sequence helper (per-invoice, temporary-storage counter)
@@ -1998,4 +1998,23 @@ mod tests {
             assert_eq!(next_seq(&env, 20), 2);
         });
     }
+}
+
+/// Topics: (split, subscription_cycle_advanced, previous_invoice_id)
+/// Data: (next_invoice_id, cycle_number, billing_deadline)
+pub fn subscription_cycle_advanced(
+    env: &Env,
+    previous_invoice_id: u64,
+    next_invoice_id: u64,
+    cycle_number: u32,
+    billing_deadline: u64,
+) {
+    env.events().publish(
+        (
+            symbol_short!("split"),
+            Symbol::new(env, "subscription_cycle_advanced"),
+            previous_invoice_id,
+        ),
+        (next_invoice_id, cycle_number, billing_deadline),
+    );
 }

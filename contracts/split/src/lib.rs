@@ -381,6 +381,25 @@ fn audit_log_key(id: u64) -> (Symbol, u64) {
 fn subscription_params_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("sub"), id)
 }
+fn subscription_cycle_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("sub_cycle"), id)
+}
+fn save_subscription_cycle(
+    env: &Env,
+    id: u64,
+    params: &SubscriptionParams,
+    cycle: u32,
+    total_cycles: u32,
+) {
+    let storage = env.storage().persistent();
+    let params_key = subscription_params_key(id);
+    let cycle_key = subscription_cycle_key(id);
+    storage.set(&params_key, params);
+    storage.set(&cycle_key, &(cycle, total_cycles));
+    for key in [params_key, cycle_key] {
+        storage.extend_ttl(&key, INVOICE_HOT_TTL_LEDGERS / 2, INVOICE_HOT_TTL_LEDGERS);
+    }
+}
 fn ext_vote_key(id: u64) -> (Symbol, u64) {
     (symbol_short!("ext_vote"), id)
 }
@@ -944,6 +963,7 @@ fn payer_history_key(payer: &Address) -> (Symbol, Address) {
 
 /// Issue #125: minimum delay between `propose_upgrade` and `execute_upgrade`.
 const UPGRADE_TIMELOCK_SECS: u64 = 48 * 60 * 60;
+const UPGRADE_EXECUTION_WINDOW_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// Issue #310: pending upgrade proposal — instance storage.
 fn upgrade_proposal_key() -> Symbol {
@@ -5367,6 +5387,7 @@ impl SplitContract {
 
         let id = Self::_create_invoice_inner(
             &env,
+            false, // recurring successor
             creator,
             recipients,
             amounts,
@@ -5500,6 +5521,7 @@ impl SplitContract {
 
         let id = Self::_create_invoice_inner(
             &env,
+            false, // recurring successor
             creator,
             recipient_addrs,
             amounts,
@@ -5574,6 +5596,7 @@ impl SplitContract {
     #[allow(clippy::too_many_arguments)]
     fn _create_invoice_inner(
         env: &Env,
+        recurring_successor: bool,
         creator: Address,
         recipients: Vec<Address>,
         amounts: Vec<i128>,
@@ -5887,6 +5910,25 @@ impl SplitContract {
             }
         }
 
+        // Issue #503: enforce per-creator open-invoice cap.
+        const DEFAULT_MAX_OPEN_INVOICES: u32 = 100;
+        let max_open: u32 = env
+            .storage()
+            .instance()
+            .get(&max_open_invoices_key())
+            .unwrap_or(DEFAULT_MAX_OPEN_INVOICES);
+        let open_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&open_invoice_count_key(&creator))
+            .unwrap_or(0u32);
+        if open_count >= max_open {
+            env.panic_with_error(ContractError::CreatorInvoiceLimitReached);
+        }
+        env.storage()
+            .persistent()
+            .set(&open_invoice_count_key(&creator), &(open_count + 1));
+
         // Charge configurable creation fee in USDC with volume-based discount (issue #203).
         let base_creation_fee: i128 = env
             .storage()
@@ -5894,7 +5936,7 @@ impl SplitContract {
             .get(&creation_fee_key())
             .unwrap_or(0);
 
-        let _creation_fee = if base_creation_fee > 0 {
+        if base_creation_fee > 0 {
             // Get creator's lifetime volume (stored as u64 by update_creator_stats_on_payment).
             let creator_volume: u64 = env
                 .storage()
@@ -5923,23 +5965,30 @@ impl SplitContract {
             let discounted_fee =
                 base_creation_fee - (base_creation_fee * discount_bps as i128 / 10_000);
 
-            let usdc_token: Address = env
-                .storage()
-                .instance()
-                .get(&usdc_token_key())
-                .expect("usdc token not set");
-            let treasury: Address = env
-                .storage()
-                .instance()
-                .get(&treasury_key())
-                .expect("treasury not set");
-            let usdc_client = token::Client::new(env, &usdc_token);
-            usdc_client.transfer(&creator, &treasury, &discounted_fee);
-
-            discounted_fee
-        } else {
-            0
-        };
+            if !recurring_successor || discounted_fee > 0 {
+                let usdc_token: Address = env
+                    .storage()
+                    .instance()
+                    .get(&usdc_token_key())
+                    .expect("usdc token not set");
+                let treasury: Address = env
+                    .storage()
+                    .instance()
+                    .get(&treasury_key())
+                    .expect("treasury not set");
+                let usdc_client = token::Client::new(env, &usdc_token);
+                if recurring_successor {
+                    usdc_client.transfer_from(
+                        &env.current_contract_address(),
+                        &creator,
+                        &treasury,
+                        &discounted_fee,
+                    );
+                } else {
+                    usdc_client.transfer(&creator, &treasury, &discounted_fee);
+                }
+            }
+        }
 
         // Issue #89: Transfer stake from creator to contract if stake_amount > 0.
         // (stake_amount is not yet wired into _create_invoice_inner; skipped)
@@ -5987,24 +6036,6 @@ impl SplitContract {
             .persistent()
             .set(&invoice_count_key(&creator), &(inv_cnt + 1));
 
-        // Issue #503: enforce per-creator open-invoice cap.
-        const DEFAULT_MAX_OPEN_INVOICES: u32 = 100;
-        let max_open: u32 = env
-            .storage()
-            .instance()
-            .get(&max_open_invoices_key())
-            .unwrap_or(DEFAULT_MAX_OPEN_INVOICES);
-        let open_count: u32 = env
-            .storage()
-            .persistent()
-            .get(&open_invoice_count_key(&creator))
-            .unwrap_or(0u32);
-        if open_count >= max_open {
-            env.panic_with_error(ContractError::CreatorInvoiceLimitReached);
-        }
-        env.storage()
-            .persistent()
-            .set(&open_invoice_count_key(&creator), &(open_count + 1));
 
         let total: i128 = amounts.iter().sum();
 
@@ -6315,6 +6346,7 @@ impl SplitContract {
             Self::_apply_rate_limit(&env, &creator);
             let id = Self::_create_invoice_inner(
                 &env,
+                false, // recurring successor
                 creator.clone(),
                 params.recipients,
                 params.amounts,
@@ -6427,6 +6459,7 @@ impl SplitContract {
         for params in params_list.iter() {
             let id = Self::_create_invoice_inner(
                 &env,
+                false, // recurring successor
                 creator.clone(),
                 params.recipients,
                 params.amounts,
@@ -6497,7 +6530,10 @@ impl SplitContract {
         ids
     }
 
-    /// Create a subscription chain of invoices for recurring monthly billing.
+    /// Create a subscription chain of up to `months` invoices.
+    /// If creation fees apply, the creator must approve a fee-token allowance for
+    /// this contract to charge each renewal. Settlement rolls back if the renewal
+    /// cannot be created. Cancel the current invoice to stop renewal.
     pub fn create_subscription(
         env: Env,
         creator: Address,
@@ -6525,6 +6561,7 @@ impl SplitContract {
         let deadline = env.ledger().timestamp() + 30 * 24 * 60 * 60;
         let id = Self::_create_invoice_inner(
             &env,
+            false, // recurring successor
             creator.clone(),
             recipients.clone(),
             amounts.clone(),
@@ -6604,9 +6641,7 @@ impl SplitContract {
                 tokens: tokens_vec,
                 interval_days,
             };
-            env.storage()
-                .persistent()
-                .set(&subscription_params_key(id), &params);
+            save_subscription_cycle(&env, id, &params, 1, months);
         }
 
         id
@@ -9998,6 +10033,7 @@ impl SplitContract {
                 &InvoiceStatus::Released,
                 &recipient,
             );
+            Self::advance_subscription(&env, invoice_id, invoice.deadline);
         }
 
         events::recipient_paid(&env, invoice_id, &recipient, payout);
@@ -11507,17 +11543,32 @@ impl SplitContract {
         update_creator_stats_on_release(env, &invoice.creator, funded);
         accrue_creator_rebate(env, &invoice.creator, funded, total_fee);
 
-        // Spin up next subscription invoice if one is scheduled.
-        if let Some(params) = env
-            .storage()
-            .persistent()
-            .get::<(Symbol, u64), SubscriptionParams>(&subscription_params_key(invoice_id))
+        if !has_failed_payouts {
+            Self::advance_subscription(env, invoice_id, invoice.deadline);
+        }
+    }
+
+    fn advance_subscription(env: &Env, invoice_id: u64, deadline: u64) {
+        let storage = env.storage().persistent();
+        if let Some(params) = storage.get::<_, SubscriptionParams>(&subscription_params_key(invoice_id))
         {
+            // Older subscriptions stored parameters for one successor only.
+            let (cycle, total_cycles): (u32, u32) = storage
+                .get(&subscription_cycle_key(invoice_id))
+                .unwrap_or((1, 2));
+            if cycle == total_cycles {
+                storage.remove(&subscription_params_key(invoice_id));
+                storage.remove(&subscription_cycle_key(invoice_id));
+                return;
+            }
             let interval_secs = params.interval_days.unwrap_or(30) as u64 * 24 * 60 * 60;
-            let next_deadline = env.ledger().timestamp() + interval_secs;
+            let next_deadline = deadline
+                .max(env.ledger().timestamp())
+                .saturating_add(interval_secs);
             let first_token = params.tokens.get(0).expect("no token in subscription");
-            let _next_id = Self::_create_invoice_inner(
+            let next_id = Self::_create_invoice_inner(
                 env,
+                true, // recurring successor
                 params.creator.clone(),
                 params.recipients.clone(),
                 params.amounts.clone(),
@@ -11583,9 +11634,10 @@ impl SplitContract {
                 Vec::new(env), // ratios
                 1_u64,         // ratio_denominator
             );
-            env.storage()
-                .persistent()
-                .remove(&subscription_params_key(invoice_id));
+            save_subscription_cycle(env, next_id, &params, cycle + 1, total_cycles);
+            storage.remove(&subscription_params_key(invoice_id));
+            storage.remove(&subscription_cycle_key(invoice_id));
+            events::subscription_cycle_advanced(env, invoice_id, next_id, cycle + 1, next_deadline);
         }
     }
 
@@ -12512,6 +12564,8 @@ impl SplitContract {
         }
 
         save_invoice(&env, invoice_id, &invoice);
+        env.storage().persistent().remove(&subscription_params_key(invoice_id));
+        env.storage().persistent().remove(&subscription_cycle_key(invoice_id));
         append_audit_entry(&env, invoice_id, symbol_short!("cancel"), &caller);
 
         // Issue: increment per-creator cancel count for cancellation rate tracking.
@@ -12627,6 +12681,7 @@ impl SplitContract {
         // Create new invoice with same recipients, amounts, and token.
         let new_id = Self::_create_invoice_inner(
             &env,
+            false, // recurring successor
             old_invoice.creator.clone(),
             old_invoice.recipients.clone(),
             old_invoice.amounts.clone(),
@@ -13004,6 +13059,7 @@ impl SplitContract {
         };
         Self::_create_invoice_inner(
             &env,
+            false, // recurring successor
             creator,
             tmpl.recipients,
             tmpl.amounts,
@@ -14908,19 +14964,26 @@ impl SplitContract {
         events::upgrade_proposed(&env, &new_wasm_hash, eligible_at);
     }
 
-    /// Execute a pending upgrade once the 48-hour timelock has elapsed.
+    /// Execute a pending upgrade during the seven days after its 48-hour timelock.
     ///
-    /// Callable by anyone after the timelock expires. Clears the proposal on success.
+    /// Callable by anyone while the contract is thawed. Clears the proposal on success.
     pub fn execute_upgrade(env: Env) {
+        require_not_frozen(&env);
         let proposal: UpgradeProposal = env
             .storage()
             .instance()
             .get(&upgrade_proposal_key())
             .expect("no upgrade proposal");
 
+        let now = env.ledger().timestamp();
         assert!(
-            env.ledger().timestamp() >= proposal.eligible_at,
+            now >= proposal.eligible_at,
             "upgrade timelock still active"
+        );
+        // Derive the deadline from the stored timestamp so existing proposals still decode.
+        assert!(
+            now <= proposal.eligible_at.saturating_add(UPGRADE_EXECUTION_WINDOW_SECS),
+            "upgrade proposal expired"
         );
 
         env.storage().instance().remove(&upgrade_proposal_key());
@@ -16606,6 +16669,7 @@ impl SplitContract {
 
         let invoice_id = Self::_create_invoice_inner(
             &env,
+            false, // recurring successor
             creator.clone(),
             template.recipients,
             amounts,
