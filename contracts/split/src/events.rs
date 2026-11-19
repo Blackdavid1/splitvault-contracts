@@ -1642,6 +1642,33 @@ pub fn cosigner_threshold_reached(env: &Env, invoice_id: u64) {
 }
 
 
+/// Topics: (split, crt_fee)
+/// Data: (old_fee, new_fee)
+pub fn creation_fee_updated(env: &Env, old_fee: i128, new_fee: i128) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("crt_fee")),
+        (old_fee, new_fee),
+    );
+}
+
+/// Topics: (split, cr_quota)
+/// Data: (old_limit, new_limit)
+pub fn creator_quota_updated(env: &Env, old_limit: u32, new_limit: u32) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("cr_quota")),
+        (old_limit, new_limit),
+    );
+}
+
+/// Topics: (split, st_quota)
+/// Data: (old_bytes, new_bytes)
+pub fn storage_quota_updated(env: &Env, old_bytes: u64, new_bytes: u64) {
+    env.events().publish(
+        (symbol_short!("split"), symbol_short!("st_quota")),
+        (old_bytes, new_bytes),
+    );
+}
+
 /// Issue #503: Emitted when admin updates the per-creator open-invoice cap.
 /// Topics: (INVOICE_LIMIT_UPDATED_V, split, inv_lim)
 /// Data: new_limit
