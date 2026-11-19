@@ -25,6 +25,20 @@ fn test_register_and_get_contracts() {
 }
 
 #[test]
+fn test_register_rejects_account_address() {
+    let (env, client, _admin) = setup();
+    let creator = Address::generate(&env);
+    let account = Address::generate(&env);
+
+    let result = client.try_register(&creator, &account);
+    assert!(result.is_err());
+
+    let contracts = client.get_contracts(&creator);
+    assert_eq!(contracts.len(), 0);
+    assert!(!client.is_registered(&account));
+}
+
+#[test]
 fn test_deregister_removes_contract() {
     let (env, client, _admin) = setup();
     let creator = Address::generate(&env);
