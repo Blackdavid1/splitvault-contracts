@@ -509,6 +509,60 @@ fn test_refund_after_deadline() {
 }
 
 #[test]
+fn test_refund_in_batches() {
+    assert_refund_batches(false);
+}
+
+#[test]
+fn test_refund_outstanding_deposit_on_legacy_refunded_invoice() {
+    assert_refund_batches(true);
+}
+
+fn assert_refund_batches(legacy_refunded: bool) {
+    let (env, contract_id) = setup();
+    let client = InvoiceEscrowContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let payer1 = Address::generate(&env);
+    let payer2 = Address::generate(&env);
+    let token = create_token(&env, &admin);
+    let deposit = 5_000_000;
+    mint(&env, &token, &admin, &payer1, deposit);
+    mint(&env, &token, &admin, &payer2, deposit);
+    client.initialize(&admin);
+    let id = client.create_invoice(&creator, &token, &(3 * deposit), &1);
+    client.deposit(&payer1, &id, &deposit);
+    client.deposit(&payer2, &id, &deposit);
+    env.ledger().set_timestamp(2);
+
+    let batch1 = soroban_sdk::vec![&env, payer1.clone()];
+    let batch2 = soroban_sdk::vec![&env, payer2.clone()];
+    let balances = token::Client::new(&env, &token);
+    client.refund(&id, &batch1);
+    assert_eq!(client.get_invoice(&id).status, EscrowStatus::Active);
+    assert_eq!(client.get_invoice(&id).funded_amount, deposit);
+    assert_eq!(client.get_deposit(&id, &payer1), 0);
+    assert_eq!(client.get_deposit(&id, &payer2), deposit);
+    assert_eq!(balances.balance(&payer1), deposit);
+
+    if legacy_refunded {
+        env.as_contract(&contract_id, || {
+            let mut invoice = super::get_invoice(&env, id).unwrap();
+            invoice.status = EscrowStatus::Refunded;
+            invoice.funded_amount = 2 * deposit;
+            super::save_invoice(&env, id, &invoice);
+        });
+    }
+
+    client.refund(&id, &batch2);
+    assert_eq!(client.get_invoice(&id).status, EscrowStatus::Refunded);
+    assert_eq!(client.get_deposit(&id, &payer2), 0);
+    assert_eq!(balances.balance(&payer2), deposit);
+    assert_eq!(balances.balance(&contract_id), 0);
+    assert_eq!(client.try_refund(&id, &batch2), Err(Ok(Error::InvalidStatus)));
+}
+
+#[test]
 fn test_refund_before_deadline_fails() {
     let (env, contract_id) = setup();
     let client = InvoiceEscrowContractClient::new(&env, &contract_id);

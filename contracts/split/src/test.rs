@@ -1036,6 +1036,127 @@ fn test_unpause_restores_pay() {
 }
 
 #[test]
+fn test_multisig_pause_and_unpause_guard_invoice_operations() {
+    let (env, contract_id, token_id) = setup();
+    let admin = init_with_admin(&env, &contract_id, &token_id);
+    let c = client(&env, &contract_id);
+    let signer = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let payer = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let id = make_invoice(&env, &c, &creator, &recipient, 200, &token_id, 9_999);
+    StellarAssetClient::new(&env, &token_id).mint(&payer, &100);
+
+    c.set_admin_set(
+        &admin,
+        &soroban_sdk::vec![&env, admin.clone(), signer.clone()],
+        &2,
+    );
+    // Start with an instance value written by the direct admin path.
+    c.unpause(&admin);
+    let hash = c.propose_admin_action(&admin, &AdminAction::PauseContract);
+    c.approve_admin_action(&signer, &hash);
+    assert!(c.is_paused());
+
+    let recipients = soroban_sdk::vec![&env, recipient];
+    let amounts = soroban_sdk::vec![&env, 200_i128];
+    let options = default_options(&env);
+    assert!(c
+        .try_create_invoice(&creator, &recipients, &amounts, &token_id, &9_999, &options)
+        .is_err());
+    assert!(c
+        .try_pay(&payer, &id, &100, &0, &false, &false, &None)
+        .is_err());
+    assert!(c.try_delete_invoice(&creator, &id).is_err());
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Pending);
+
+    let hash = c.propose_admin_action(&admin, &AdminAction::UnpauseContract);
+    c.approve_admin_action(&signer, &hash);
+    assert!(!c.is_paused());
+    c.create_invoice(&creator, &recipients, &amounts, &token_id, &9_999, &options);
+    c.pay(&payer, &id, &100, &0, &false, &false, &None);
+    assert_eq!(c.get_invoice(&id).funded, 100);
+}
+
+#[test]
+fn test_storage_limit_setters_require_admin_and_emit_events() {
+    let (env, contract_id, token_id) = setup();
+    let admin = init_with_admin(&env, &contract_id, &token_id);
+    let c = client(&env, &contract_id);
+    let non_admin = Address::generate(&env);
+
+    assert!(c.try_set_max_audit_log_entries(&non_admin, &0).is_err());
+    assert!(c.try_set_max_leaderboard_size(&non_admin, &0).is_err());
+    env.set_auths(&[]);
+    assert!(c.try_set_max_audit_log_entries(&admin, &10).is_err());
+    assert!(c.try_set_max_leaderboard_size(&admin, &20).is_err());
+
+    env.mock_all_auths();
+    c.set_max_audit_log_entries(&admin, &10);
+    assert!(env.events().all().events().iter().any(|event| {
+        xdr_event_topics(&env, event)
+            .is_some_and(|topics| topic0_is(&env, &topics, "max_audit_log_entries_updated"))
+    }));
+    c.set_max_leaderboard_size(&admin, &20);
+    assert!(env.events().all().events().iter().any(|event| {
+        xdr_event_topics(&env, event)
+            .is_some_and(|topics| topic0_is(&env, &topics, "max_leaderboard_size_updated"))
+    }));
+    env.as_contract(&contract_id, || {
+        let storage = env.storage().persistent();
+        assert_eq!(storage.get(&max_audit_log_entries_key()), Some(10_u32));
+        assert_eq!(storage.get(&max_leaderboard_size_key()), Some(20_u32));
+    });
+}
+
+#[test]
+fn test_delete_invoice_requires_creator_cosigner_auth() {
+    use soroban_sdk::{
+        testutils::{MockAuth, MockAuthInvoke},
+        IntoVal,
+    };
+
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let cosigner = Address::generate(&env);
+    let mut options = default_options(&env);
+    options.cosigners = Some(soroban_sdk::vec![&env, cosigner.clone()]);
+    let id = c.create_invoice(
+        &creator,
+        &soroban_sdk::vec![&env, Address::generate(&env)],
+        &soroban_sdk::vec![&env, 200_i128],
+        &token_id,
+        &9_999,
+        &options,
+    );
+
+    let invocation = MockAuthInvoke {
+        contract: &contract_id,
+        fn_name: "delete_invoice",
+        args: (&creator, id).into_val(&env),
+        sub_invokes: &[],
+    };
+    let creator_auth = MockAuth {
+        address: &creator,
+        invoke: &invocation,
+    };
+    assert!(c
+        .mock_auths(&[creator_auth.clone()])
+        .try_delete_invoice(&creator, &id)
+        .is_err());
+    assert_eq!(c.get_invoice(&id).status, InvoiceStatus::Pending);
+
+    let cosigner_auth = MockAuth {
+        address: &cosigner,
+        invoke: &invocation,
+    };
+    c.mock_auths(&[creator_auth, cosigner_auth])
+        .delete_invoice(&creator, &id);
+    assert_eq!(c.get_tombstone(&id).deleted_by, creator);
+}
+
+#[test]
 #[should_panic(expected = "payer not allowed")]
 fn test_allowed_payers_unlisted_address_rejected() {
     let (env, contract_id, token_id) = setup_initialized();

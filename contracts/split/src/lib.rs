@@ -16252,12 +16252,14 @@ impl SplitContract {
     // -----------------------------------------------------------------------
 
     /// Soft-delete an invoice, writing a tombstone record for audit trail.
-    /// Only the creator can delete a Pending invoice with no unclaimed funds.
+    /// Requires the creator and any configured creator cosigners to authorize
+    /// deletion of a Pending invoice with no unclaimed funds.
     ///
     /// # Arguments
     /// * `caller` - must be the current creator of the invoice
     /// * `invoice_id` - target invoice
     pub fn delete_invoice(env: Env, caller: Address, invoice_id: u64) {
+        require_not_paused(&env);
         caller.require_auth();
         let invoice = load_invoice(&env, invoice_id);
         assert!(
@@ -16267,6 +16269,18 @@ impl SplitContract {
         assert!(invoice.creator == caller, "OnlyCreator");
         assert!(invoice.status == InvoiceStatus::Pending, "InvalidStatus");
         assert!(invoice.funded == 0, "FundsUnclaimed");
+        if let Some(cosigner) = &invoice.creator_cosigner {
+            cosigner.require_auth();
+        }
+        if let Some(cosigners) = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<Address>>(&cosigners_key(invoice_id))
+        {
+            for cosigner in cosigners.iter() {
+                cosigner.require_auth();
+            }
+        }
         let tombstone = Tombstone {
             invoice_id,
             deleted_at_ledger: env.ledger().sequence(),
@@ -16394,10 +16408,10 @@ impl SplitContract {
             // Execute the action.
             match pending.action.clone() {
                 AdminAction::PauseContract => {
-                    env.storage().persistent().set(&paused_key(), &true);
+                    env.storage().instance().set(&paused_key(), &true);
                 }
                 AdminAction::UnpauseContract => {
-                    env.storage().persistent().set(&paused_key(), &false);
+                    env.storage().instance().set(&paused_key(), &false);
                 }
                 AdminAction::SetPlatformFeeBps(bps) => {
                     assert!(bps <= 10_000, "fee_bps must be ≤ 10000");
@@ -16553,19 +16567,23 @@ impl SplitContract {
     /// Set the maximum number of audit log entries per invoice.
     /// Only callable by the contract creator (admin).
     pub fn set_max_audit_log_entries(env: Env, admin: Address, max: u32) {
-        admin.require_auth();
+        assert!(require_admin(&env) == admin, "NotAuthorized");
         env.storage()
             .persistent()
             .set(&max_audit_log_entries_key(), &max);
+        env.events()
+            .publish((Symbol::new(&env, "max_audit_log_entries_updated"),), max);
     }
 
     /// Set the maximum number of leaderboard entries per invoice.
     /// Only callable by the contract creator (admin).
     pub fn set_max_leaderboard_size(env: Env, admin: Address, max: u32) {
-        admin.require_auth();
+        assert!(require_admin(&env) == admin, "NotAuthorized");
         env.storage()
             .persistent()
             .set(&max_leaderboard_size_key(), &max);
+        env.events()
+            .publish((Symbol::new(&env, "max_leaderboard_size_updated"),), max);
     }
 
     // -----------------------------------------------------------------------

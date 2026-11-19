@@ -575,6 +575,8 @@ impl InvoiceEscrowContract {
     /// and transitions to `Refunded` only once `funded_amount` reaches zero,
     /// i.e. every recorded deposit has been returned.  This prevents the first
     /// batch from permanently locking out subsequent batches.
+    /// Legacy invoices marked `Refunded` early can still refund outstanding
+    /// deposits.
     ///
     /// # Arguments
     /// * `invoice_id` — Target invoice.
@@ -582,7 +584,8 @@ impl InvoiceEscrowContract {
     ///
     /// # Errors
     /// * [`Error::InvoiceNotFound`]    — Unknown invoice ID.
-    /// * [`Error::InvalidStatus`]      — Invoice already released or refunded.
+    /// * [`Error::InvalidStatus`]      — Invoice was released or cancelled, or
+    ///   was marked refunded and this batch has no outstanding deposits.
     /// * [`Error::DeadlineNotPassed`]  — Deadline has not expired yet.
     /// * [`Error::Reentrancy`]         — Reentrant call detected.
     pub fn refund(env: Env, invoice_id: u64, payers: Vec<Address>) -> Result<(), Error> {
@@ -596,10 +599,7 @@ impl InvoiceEscrowContract {
             }
         };
 
-        if invoice.status == EscrowStatus::Released
-            || invoice.status == EscrowStatus::Refunded
-            || invoice.status == EscrowStatus::Cancelled
-        {
+        if invoice.status == EscrowStatus::Released || invoice.status == EscrowStatus::Cancelled {
             release_lock(&env);
             return Err(Error::InvalidStatus);
         }
@@ -609,6 +609,7 @@ impl InvoiceEscrowContract {
         }
 
         let token_client = token::Client::new(&env, &invoice.token);
+        let mut refunded_deposit = false;
         for payer in payers.iter() {
             let amount: i128 = env
                 .storage()
@@ -623,8 +624,14 @@ impl InvoiceEscrowContract {
                 // Issue #42: decrement funded_amount so the contract tracks
                 // how much remains to be refunded across batches.
                 invoice.funded_amount = invoice.funded_amount.saturating_sub(amount);
+                refunded_deposit = true;
                 emit_refunded(&env, invoice_id, &payer, amount);
             }
+        }
+
+        if invoice.status == EscrowStatus::Refunded && !refunded_deposit {
+            release_lock(&env);
+            return Err(Error::InvalidStatus);
         }
 
         // Issue #42: only mark the invoice as fully refunded once all recorded
