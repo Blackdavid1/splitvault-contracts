@@ -467,7 +467,7 @@ mod test {
         BytesN, Env, TryFromVal, Val, Vec,
     };
 
-    /// Minimal valid Soroban WASM stub (soroban-sdk doctest fixture).
+    /// Minimal valid Soroban WASM stub; source and retrieval: docs/FACTORY_FIXTURE.md.
     const STUB_WASM: &[u8] = include_bytes!("../../../tests/fixtures/stub_contract.wasm");
 
     #[test]
