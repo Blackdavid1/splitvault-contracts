@@ -140,22 +140,35 @@ fn test_unauthorized_caller_rejected() {
 // #83 — Multi-instance split contract registry tests
 // ---------------------------------------------------------------------------
 
-/// A second split contract registered by the admin can report metrics (#83).
+#[contract]
+struct DashboardReporter;
+
+#[contractimpl]
+impl DashboardReporter {
+    pub fn create(env: Env, dashboard: Address, creator: Address, total: i128) {
+        DashboardContractClient::new(&env, &dashboard).record_created(
+            &env.current_contract_address(),
+            &creator,
+            &total,
+        );
+    }
+}
+
 #[test]
 fn test_multiple_split_contracts_can_report() {
-    let (env, split_a, dashboard_id) = setup();
+    let env = Env::default();
+    let split_a = env.register(DashboardReporter, ());
+    let split_b = env.register(DashboardReporter, ());
+    let admin = Address::generate(&env);
+    let dashboard_id = env.register(DashboardContract, ());
     let client = DashboardContractClient::new(&env, &dashboard_id);
-
-    let split_b = Address::generate(&env);
-    client.register_split_contract(&split_b);
-
-    assert!(client.is_authorized_split_contract(&split_a));
-    assert!(client.is_authorized_split_contract(&split_b));
+    client.initialize(&admin, &split_a);
 
     let creator = Address::generate(&env);
     client.record_created(&split_a, &creator, &1000_i128);
     client.record_created(&split_b, &creator, &2000_i128);
 
+    reporter_b.create(&dashboard_id, &creator, &2000);
     let dash = client.get_creator_dashboard(&creator);
     assert_eq!(dash.invoice_count, 2);
     assert_eq!(dash.total_volume, 3000);
@@ -226,30 +239,6 @@ fn test_set_admin_rotates_admin() {
 use soroban_sdk::testutils::Events as _;
 use soroban_sdk::{symbol_short, IntoVal, TryFromVal, Val};
 
-fn find_dash_event(env: &Env, action: soroban_sdk::Symbol) -> bool {
-    let events = env.events().all();
-    for event in events.events().iter() {
-        let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
-        let mut topics = soroban_sdk::Vec::new(env);
-        let topics_ref: &[soroban_sdk::xdr::ScVal] = body.topics.as_ref();
-        for v in topics_ref.iter() {
-            if let Ok(val) = <Val as TryFromVal<Env, soroban_sdk::xdr::ScVal>>::try_from_val(env, v) {
-                topics.push_back(val);
-            }
-        }
-        if topics.len() >= 2 {
-            let t0 = <soroban_sdk::Symbol as TryFromVal<Env, Val>>::try_from_val(env, &topics.get_unchecked(0));
-            let t1 = <soroban_sdk::Symbol as TryFromVal<Env, Val>>::try_from_val(env, &topics.get_unchecked(1));
-            if let (Ok(topic0), Ok(topic1)) = (t0, t1) {
-                if topic0 == symbol_short!("dash") && topic1 == action {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
 /// `record_created` must emit `(dash, created, creator)` (#50).
 #[test]
 fn test_record_created_emits_event() {
@@ -260,7 +249,7 @@ fn test_record_created_emits_event() {
     client.record_created(&split_id, &creator, &500_i128);
 
     assert!(
-        find_dash_event(&env, symbol_short!("created")),
+        find_dash_event_data(&env, symbol_short!("created")).is_some(),
         "record_created did not emit (dash, created) event",
     );
 }
@@ -276,7 +265,7 @@ fn test_record_released_emits_event() {
     client.record_released(&split_id, &creator, &500_i128);
 
     assert!(
-        find_dash_event(&env, symbol_short!("released")),
+        find_dash_event_data(&env, symbol_short!("released")).is_some(),
         "record_released did not emit (dash, released) event",
     );
 }
@@ -291,7 +280,7 @@ fn test_record_refunded_emits_event() {
     client.record_refunded(&split_id, &creator, &100_i128);
 
     assert!(
-        find_dash_event(&env, symbol_short!("refunded")),
+        find_dash_event_data(&env, symbol_short!("refunded")).is_some(),
         "record_refunded did not emit (dash, refunded) event",
     );
 }
@@ -306,7 +295,7 @@ fn find_dash_event_data(
     action: soroban_sdk::Symbol,
 ) -> Option<(Address, u64, i128)> {
     let events = env.events().all();
-    for event in events.events().iter() {
+    for event in events.events().iter().rev() {
         let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
         let mut topics = soroban_sdk::Vec::new(env);
         let topics_ref: &[soroban_sdk::xdr::ScVal] = body.topics.as_ref();
@@ -345,8 +334,9 @@ fn test_record_created_event_payload() {
     client.record_created(&split_id, &creator, &1000_i128);
     client.record_created(&split_id, &creator, &2000_i128);
 
-    let (ev_creator, count, volume) =
+    let (ev_creator, data) =
         find_dash_event_data(&env, symbol_short!("created")).expect("missing created event");
+    let (count, volume) = <(u64, i128)>::try_from_val(&env, &data).unwrap();
     assert_eq!(ev_creator, creator);
     assert_eq!(count, 2);
     assert_eq!(volume, 3000);
@@ -362,8 +352,9 @@ fn test_record_released_event_payload() {
     client.record_released(&split_id, &creator, &3000_i128);
     client.record_released(&split_id, &creator, &2000_i128);
 
-    let (ev_creator, count, volume) =
+    let (ev_creator, data) =
         find_dash_event_data(&env, symbol_short!("released")).expect("missing released event");
+    let (count, volume) = <(u64, i128)>::try_from_val(&env, &data).unwrap();
     assert_eq!(ev_creator, creator);
     assert_eq!(count, 2);
     assert_eq!(volume, 5000);
