@@ -34,6 +34,13 @@ jobs:
       - name: Install stellar-cli
         run: cargo install --locked stellar-cli --version 28.1.0
 
+      - name: Install stellar-cli
+        shell: bash
+        run: |
+          curl -fsSL https://github.com/stellar/stellar-cli/releases/download/v25.2.0/stellar-cli-25.2.0-x86_64-unknown-linux-gnu.tar.gz |
+            tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
       - name: Build contracts
         run: stellar contract build --package split
 
@@ -69,6 +76,7 @@ jobs:
 
       - name: Run compute budget estimation
         id: budget
+        shell: bash
         run: |
           # Run the estimation test that checks all functions against the budget limit
           cargo test --package split -- compute_budget --nocapture 2>&1 | tee budget_output.txt

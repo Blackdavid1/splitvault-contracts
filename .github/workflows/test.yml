@@ -36,7 +36,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-test-${{ matrix.package }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
 
       - name: Verify testnet deployment manifest fixture
         run: bash scripts/test-testnet-deployment-manifest.sh
@@ -59,6 +59,19 @@ jobs:
         run: cargo fmt --all -- --check
 
   fuzz:
+    name: Fuzz ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_create_invoice
+          - fuzz_pay
+          - fuzz_release
+          - fuzz_refund
+          - fuzz_sequence
+          - fuzz_fee_deduct
+          - fuzz_ratio_validation
+          - fuzz_split_arithmetic
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

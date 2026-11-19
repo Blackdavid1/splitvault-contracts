@@ -59,7 +59,7 @@ Soroban SDK 28 contracts must use `wasm32v1-none` and `stellar contract build`.
 ### Run Tests
 
 ```bash
-cargo test --workspace
+cargo test --locked --workspace
 ```
 
 ### Fuzzing
