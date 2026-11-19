@@ -10,6 +10,8 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@v4
 
@@ -47,10 +49,19 @@ jobs:
           echo "Account funded."
 
       - name: Deploy contract
+        shell: bash
         run: |
           stellar contract deploy \
             --wasm target/wasm32v1-none/release/split.wasm \
             --source deployer \
-            --network testnet \
-            --rpc-url https://soroban-testnet.stellar.org \
-            --network-passphrase "Test SDF Network ; September 2015"
+            --network testnet)
+          echo "Deployed contract $contract_id"
+          bash scripts/testnet-deployment-manifest.sh "$contract_id" "$GITHUB_SHA" "$wasm" \
+            > testnet-deployment.json
+
+      - name: Upload deployment manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: testnet-deployment
+          path: testnet-deployment.json
+          if-no-files-found: error

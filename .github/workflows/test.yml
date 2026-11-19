@@ -38,6 +38,9 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Verify testnet deployment manifest fixture
+        run: bash scripts/test-testnet-deployment-manifest.sh
+
       - name: Run tests
         run: cargo test --workspace
 
@@ -65,10 +68,15 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             fuzz/target
-          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('fuzz/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('fuzz/Cargo.lock') }}
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
+        run: |
+          cargo install --locked --version 0.13.2 cargo-fuzz
+          cargo fuzz --version
+
+      - name: Check locked fuzz dependencies
+        run: cargo check --locked --manifest-path fuzz/Cargo.toml
 
       - name: Fuzz ${{ matrix.target }} (60s)
         env:
