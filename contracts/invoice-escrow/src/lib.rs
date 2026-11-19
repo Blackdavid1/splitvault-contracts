@@ -24,9 +24,7 @@ mod types;
 mod test;
 
 use errors::Error;
-use soroban_sdk::{
-    contract, contractimpl, symbol_short, token, Address, BytesN, Env, Symbol, Vec,
-};
+use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, BytesN, Env, Symbol, Vec};
 use types::{BlacklistEntry, EscrowInvoice, EscrowReleased, EscrowStatus};
 
 // ---------------------------------------------------------------------------
@@ -384,11 +382,7 @@ impl InvoiceEscrowContract {
         }
         creator.require_auth();
 
-        let id: u64 = env
-            .storage()
-            .instance()
-            .get(&counter_key())
-            .unwrap_or(0u64);
+        let id: u64 = env.storage().instance().get(&counter_key()).unwrap_or(0u64);
         let next_id = id.checked_add(1).expect("invoice counter overflow");
         env.storage().instance().set(&counter_key(), &next_id);
 
@@ -575,6 +569,8 @@ impl InvoiceEscrowContract {
     /// and transitions to `Refunded` only once `funded_amount` reaches zero,
     /// i.e. every recorded deposit has been returned.  This prevents the first
     /// batch from permanently locking out subsequent batches.
+    /// Legacy invoices marked `Refunded` early can still refund outstanding
+    /// deposits.
     ///
     /// # Arguments
     /// * `invoice_id` — Target invoice.
@@ -582,7 +578,8 @@ impl InvoiceEscrowContract {
     ///
     /// # Errors
     /// * [`Error::InvoiceNotFound`]    — Unknown invoice ID.
-    /// * [`Error::InvalidStatus`]      — Invoice already released or refunded.
+    /// * [`Error::InvalidStatus`]      — Invoice was released or cancelled, or
+    ///   was marked refunded and this batch has no outstanding deposits.
     /// * [`Error::DeadlineNotPassed`]  — Deadline has not expired yet.
     /// * [`Error::Reentrancy`]         — Reentrant call detected.
     pub fn refund(env: Env, invoice_id: u64, payers: Vec<Address>) -> Result<(), Error> {
@@ -596,10 +593,7 @@ impl InvoiceEscrowContract {
             }
         };
 
-        if invoice.status == EscrowStatus::Released
-            || invoice.status == EscrowStatus::Refunded
-            || invoice.status == EscrowStatus::Cancelled
-        {
+        if invoice.status == EscrowStatus::Released || invoice.status == EscrowStatus::Cancelled {
             release_lock(&env);
             return Err(Error::InvalidStatus);
         }
@@ -609,6 +603,7 @@ impl InvoiceEscrowContract {
         }
 
         let token_client = token::Client::new(&env, &invoice.token);
+        let mut refunded_deposit = false;
         for payer in payers.iter() {
             let amount: i128 = env
                 .storage()
@@ -623,8 +618,14 @@ impl InvoiceEscrowContract {
                 // Issue #42: decrement funded_amount so the contract tracks
                 // how much remains to be refunded across batches.
                 invoice.funded_amount = invoice.funded_amount.saturating_sub(amount);
+                refunded_deposit = true;
                 emit_refunded(&env, invoice_id, &payer, amount);
             }
+        }
+
+        if invoice.status == EscrowStatus::Refunded && !refunded_deposit {
+            release_lock(&env);
+            return Err(Error::InvalidStatus);
         }
 
         // Issue #42: only mark the invoice as fully refunded once all recorded
@@ -699,11 +700,7 @@ impl InvoiceEscrowContract {
         if !env.storage().instance().has(&admin_key()) {
             return Err(Error::NotInitialized);
         }
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&admin_key())
-            .unwrap();
+        let stored_admin: Address = env.storage().instance().get(&admin_key()).unwrap();
         if admin != stored_admin {
             return Err(Error::NotAdmin);
         }
@@ -767,9 +764,7 @@ impl InvoiceEscrowContract {
         // The appeal must be submitted within APPEAL_WINDOW_LEDGERS ledgers of
         // the ban, eliminating drift from variable ledger close times.
         let current_ledger = env.ledger().sequence();
-        let appeal_deadline = entry
-            .ban_ledger
-            .saturating_add(APPEAL_WINDOW_LEDGERS);
+        let appeal_deadline = entry.ban_ledger.saturating_add(APPEAL_WINDOW_LEDGERS);
         if current_ledger > appeal_deadline {
             return Err(Error::AppealWindowExpired);
         }
@@ -781,10 +776,8 @@ impl InvoiceEscrowContract {
         emit_appeal_submitted(&env, &payer, &appeal_hash);
 
         // Log invoice context in event
-        env.events().publish(
-            (symbol_short!("appeal"), invoice_id),
-            payer,
-        );
+        env.events()
+            .publish((symbol_short!("appeal"), invoice_id), payer);
         Ok(())
     }
 
@@ -816,11 +809,7 @@ impl InvoiceEscrowContract {
         if !env.storage().instance().has(&admin_key()) {
             return Err(Error::NotInitialized);
         }
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&admin_key())
-            .unwrap();
+        let stored_admin: Address = env.storage().instance().get(&admin_key()).unwrap();
         if admin != stored_admin {
             return Err(Error::NotAdmin);
         }
@@ -844,9 +833,7 @@ impl InvoiceEscrowContract {
                 .set(&blacklist_key(&payer), &entry);
         } else {
             // Reinstate: remove the blacklist entry.
-            env.storage()
-                .persistent()
-                .remove(&blacklist_key(&payer));
+            env.storage().persistent().remove(&blacklist_key(&payer));
         }
 
         emit_blacklist_finalised(&env, &payer, uphold);
@@ -919,9 +906,7 @@ impl InvoiceEscrowContract {
 
     /// Return the blacklist entry for a payer, if any.
     pub fn get_blacklist_entry(env: Env, payer: Address) -> Option<BlacklistEntry> {
-        env.storage()
-            .persistent()
-            .get(&blacklist_key(&payer))
+        env.storage().persistent().get(&blacklist_key(&payer))
     }
 
     /// Return `true` if the payer is blacklisted with a finalised and upheld entry.
