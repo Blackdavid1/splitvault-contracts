@@ -24,9 +24,7 @@ mod types;
 mod test;
 
 use errors::Error;
-use soroban_sdk::{
-    contract, contractimpl, symbol_short, token, Address, BytesN, Env, Symbol, Vec,
-};
+use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, BytesN, Env, Symbol, Vec};
 use types::{BlacklistEntry, EscrowInvoice, EscrowReleased, EscrowStatus};
 
 // ---------------------------------------------------------------------------
@@ -384,11 +382,7 @@ impl InvoiceEscrowContract {
         }
         creator.require_auth();
 
-        let id: u64 = env
-            .storage()
-            .instance()
-            .get(&counter_key())
-            .unwrap_or(0u64);
+        let id: u64 = env.storage().instance().get(&counter_key()).unwrap_or(0u64);
         let next_id = id.checked_add(1).expect("invoice counter overflow");
         env.storage().instance().set(&counter_key(), &next_id);
 
@@ -699,11 +693,7 @@ impl InvoiceEscrowContract {
         if !env.storage().instance().has(&admin_key()) {
             return Err(Error::NotInitialized);
         }
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&admin_key())
-            .unwrap();
+        let stored_admin: Address = env.storage().instance().get(&admin_key()).unwrap();
         if admin != stored_admin {
             return Err(Error::NotAdmin);
         }
@@ -767,9 +757,7 @@ impl InvoiceEscrowContract {
         // The appeal must be submitted within APPEAL_WINDOW_LEDGERS ledgers of
         // the ban, eliminating drift from variable ledger close times.
         let current_ledger = env.ledger().sequence();
-        let appeal_deadline = entry
-            .ban_ledger
-            .saturating_add(APPEAL_WINDOW_LEDGERS);
+        let appeal_deadline = entry.ban_ledger.saturating_add(APPEAL_WINDOW_LEDGERS);
         if current_ledger > appeal_deadline {
             return Err(Error::AppealWindowExpired);
         }
@@ -781,10 +769,8 @@ impl InvoiceEscrowContract {
         emit_appeal_submitted(&env, &payer, &appeal_hash);
 
         // Log invoice context in event
-        env.events().publish(
-            (symbol_short!("appeal"), invoice_id),
-            payer,
-        );
+        env.events()
+            .publish((symbol_short!("appeal"), invoice_id), payer);
         Ok(())
     }
 
@@ -816,11 +802,7 @@ impl InvoiceEscrowContract {
         if !env.storage().instance().has(&admin_key()) {
             return Err(Error::NotInitialized);
         }
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&admin_key())
-            .unwrap();
+        let stored_admin: Address = env.storage().instance().get(&admin_key()).unwrap();
         if admin != stored_admin {
             return Err(Error::NotAdmin);
         }
@@ -844,9 +826,7 @@ impl InvoiceEscrowContract {
                 .set(&blacklist_key(&payer), &entry);
         } else {
             // Reinstate: remove the blacklist entry.
-            env.storage()
-                .persistent()
-                .remove(&blacklist_key(&payer));
+            env.storage().persistent().remove(&blacklist_key(&payer));
         }
 
         emit_blacklist_finalised(&env, &payer, uphold);
@@ -919,9 +899,7 @@ impl InvoiceEscrowContract {
 
     /// Return the blacklist entry for a payer, if any.
     pub fn get_blacklist_entry(env: Env, payer: Address) -> Option<BlacklistEntry> {
-        env.storage()
-            .persistent()
-            .get(&blacklist_key(&payer))
+        env.storage().persistent().get(&blacklist_key(&payer))
     }
 
     /// Return `true` if the payer is blacklisted with a finalised and upheld entry.
