@@ -151,4 +151,6 @@ pub enum ContractError {
     /// Structured variant so RPC callers can inspect the error code and prompt
     /// a migration workflow instead of seeing a generic WASM trap.
     SchemaMigrationRequired = 101,
+    /// Issue #143: a clone has unpaired overrides or mismatched split vector lengths.
+    LengthMismatch = 102,
 }
