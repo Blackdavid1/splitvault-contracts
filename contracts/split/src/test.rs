@@ -2029,6 +2029,20 @@ fn test_set_creation_fee_updates_fee() {
 
     c.set_creation_fee(&admin, &25_i128);
     assert_eq!(c.get_creation_fee(), 25);
+
+    use soroban_sdk::TryIntoVal;
+    let events = env.events().all();
+    assert!(events.events().iter().any(|event| {
+        if !xdr_event_topics(&env, event).is_some_and(|topics| {
+            topic0_is(&env, &topics, "split") && topic1_is(&env, &topics, "crt_fee")
+        }) {
+            return false;
+        }
+        let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
+        let value = Val::try_from_val(&env, &body.data).unwrap();
+        let data: (i128, i128) = value.try_into_val(&env).unwrap();
+        data == (10, 25)
+    }));
 }
 
 #[test]
@@ -3339,6 +3353,60 @@ fn test_payment_proof_hash_deterministic() {
     let proof2 = c.generate_payment_proof(&id, &payer);
     assert_eq!(proof1.proof_hash, proof2.proof_hash);
     assert_eq!(proof1.total_paid, proof2.total_paid);
+}
+
+#[test]
+fn test_payment_proof_binds_payer_for_equal_payments() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let payer_a = Address::generate(&env);
+    let payer_b = Address::generate(&env);
+    let token = StellarAssetClient::new(&env, &token_id);
+    token.mint(&payer_a, &100);
+    token.mint(&payer_b, &100);
+
+    let id = make_invoice(&env, &c, &creator, &recipient, 300, &token_id, 9_999_999);
+    c.pay(&payer_a, &id, &100, &0, &false, &false, &None);
+    c.pay(&payer_b, &id, &100, &0, &false, &false, &None);
+
+    let proof_a = c.generate_payment_proof(&id, &payer_a);
+    let proof_b = c.generate_payment_proof(&id, &payer_b);
+    assert_eq!(proof_a.total_paid, proof_b.total_paid);
+    assert_ne!(proof_a.proof_hash, proof_b.proof_hash);
+    assert!(c.verify_payment_proof(&proof_a));
+    assert!(c.verify_payment_proof(&proof_b));
+}
+
+#[test]
+fn test_invoice_phase_creator_arbiter_and_admin() {
+    let (env, contract_id, token_id) = setup_initialized();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let arbiter = Address::generate(&env);
+    let admin: Address = env.as_contract(&contract_id, || {
+        env.storage().instance().get(&admin_key()).unwrap()
+    });
+    let id = make_invoice(&env, &c, &creator, &recipient, 300, &token_id, 9_999_999);
+    c.set_arbiter(&admin, &id, &arbiter);
+
+    assert!(matches!(
+        c.try_set_invoice_phase(&creator, &id, &types::InvoicePhase::Locked),
+        Err(Ok(error)) if error == soroban_sdk::Error::from(ContractError::InvalidPhaseTransition)
+    ));
+    c.set_invoice_phase(&creator, &id, &types::InvoicePhase::Active);
+    c.set_invoice_phase(&arbiter, &id, &types::InvoicePhase::Locked);
+    assert!(matches!(
+        c.get_invoice_phase(&id),
+        types::InvoicePhase::Locked
+    ));
+    c.set_invoice_phase(&admin, &id, &types::InvoicePhase::Released);
+    assert!(matches!(
+        c.get_invoice_phase(&id),
+        types::InvoicePhase::Released
+    ));
 }
 
 // ---------------------------------------------------------------------------

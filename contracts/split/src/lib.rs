@@ -53,6 +53,7 @@ const ORACLE_RATE_SCALE: i128 = 1_000_000;
 /// the test suite (~200 recipients, ~15KB) so it only trips on genuinely unbounded
 /// growth; admins can tighten it via `set_invoice_storage_quota`.
 const DEFAULT_INVOICE_STORAGE_QUOTA: u64 = 65_536;
+const DEFAULT_MAX_OPEN_INVOICES: u32 = 100;
 
 mod calc;
 mod constants;
@@ -1804,6 +1805,16 @@ fn maybe_archive_invoice(env: &Env, id: u64) {
     events::invoice_archived(env, id);
 }
 
+fn payment_proof_hash(env: &Env, invoice_id: u64, payer: &Address, total_paid: i128) -> BytesN<32> {
+    let preimage = (
+        env.current_contract_address(),
+        invoice_id,
+        payer.clone(),
+        total_paid,
+    );
+    env.crypto().sha256(&preimage.to_xdr(env)).into()
+}
+
 fn load_invoice(env: &Env, id: u64) -> Invoice {
     maybe_archive_invoice(env, id);
     // Read hot fields from instance storage and extend TTL on every access.
@@ -3300,9 +3311,11 @@ impl SplitContract {
     pub fn set_creation_fee(env: Env, admin: Address, creation_fee: i128) {
         require_admin_role(&env, &admin, AdminRole::Operator);
         assert!(creation_fee >= 0, "creation_fee must be non-negative");
+        let old_fee = Self::get_creation_fee(env.clone());
         env.storage()
             .instance()
             .set(&creation_fee_key(), &creation_fee);
+        events::creation_fee_updated(&env, old_fee, creation_fee);
     }
 
     /// Set the global per-invoice storage quota in bytes (issue #425). Requires
@@ -3311,18 +3324,26 @@ impl SplitContract {
     pub fn set_invoice_storage_quota(env: Env, admin: Address, bytes: u64) {
         require_admin_role(&env, &admin, AdminRole::Operator);
         assert!(bytes > 0, "quota must be positive");
+        let old_quota = Self::get_storage_quota(env.clone());
         env.storage().instance().set(&storage_quota_key(), &bytes);
+        events::storage_quota_updated(&env, old_quota, bytes);
     }
 
     /// Issue #503: Set the maximum number of open invoices a single creator may hold at once.
-    /// Admin-only. Emits InvoiceLimitUpdated(new_limit).
+    /// Admin-only. Emits the new limit and an event with the previous and new limits.
     pub fn set_max_open_invoices(env: Env, admin: Address, new_limit: u32) {
         require_admin_role(&env, &admin, AdminRole::Operator);
         assert!(new_limit > 0, "new_limit must be positive");
+        let old_limit = env
+            .storage()
+            .instance()
+            .get(&max_open_invoices_key())
+            .unwrap_or(DEFAULT_MAX_OPEN_INVOICES);
         env.storage()
             .instance()
             .set(&max_open_invoices_key(), &new_limit);
         events::invoice_limit_updated(&env, new_limit);
+        events::creator_quota_updated(&env, old_limit, new_limit);
     }
 
     /// Returns the current global per-invoice storage quota in bytes (issue #425).
@@ -5984,7 +6005,6 @@ impl SplitContract {
             .set(&invoice_count_key(&creator), &(inv_cnt + 1));
 
         // Issue #503: enforce per-creator open-invoice cap.
-        const DEFAULT_MAX_OPEN_INVOICES: u32 = 100;
         let max_open: u32 = env
             .storage()
             .instance()
@@ -13526,7 +13546,8 @@ impl SplitContract {
             .set(&slippage_tolerance_key(invoice_id), &slippage_bps);
     }
 
-    /// Issue #449: Set invoice phase. Transitions must follow: Draft -> Active -> Locked -> Released.
+    /// Set an invoice's phase as its creator, arbiter, or the contract admin.
+    /// Transitions must follow Draft -> Active -> Locked -> Released.
     pub fn set_invoice_phase(
         env: Env,
         caller: Address,
@@ -13535,18 +13556,32 @@ impl SplitContract {
     ) {
         require_not_paused(&env);
         caller.require_auth();
-        let current_phase: types::InvoicePhase = env
-            .storage()
-            .persistent()
-            .get(&invoice_phase_key(invoice_id))
-            .unwrap_or(types::InvoicePhase::Draft);
+        let invoice = Self::load_invoice_opt(&env, invoice_id)
+            .unwrap_or_else(|err| env.panic_with_error(err));
+        let admin: Option<Address> = env.storage().instance().get(&admin_key());
+        if caller != invoice.creator && admin.as_ref() != Some(&caller) {
+            let key = invoice_ext2_key(invoice_id);
+            let ext: Option<InvoiceExt2> = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .or_else(|| env.storage().instance().get(&key));
+            if ext.and_then(|ext| ext.arbiter).as_ref() != Some(&caller) {
+                env.panic_with_error(ContractError::NotAuthorized);
+            }
+        }
+
+        let current_phase = Self::get_invoice_phase(env.clone(), invoice_id)
+            .unwrap_or_else(|err| env.panic_with_error(err));
         let valid = matches!(
             (&current_phase, &new_phase),
             (types::InvoicePhase::Draft, types::InvoicePhase::Active)
                 | (types::InvoicePhase::Active, types::InvoicePhase::Locked)
                 | (types::InvoicePhase::Locked, types::InvoicePhase::Released)
         );
-        assert!(valid, "InvalidPhaseTransition");
+        if !valid {
+            env.panic_with_error(ContractError::InvalidPhaseTransition);
+        }
         env.storage()
             .persistent()
             .set(&invoice_phase_key(invoice_id), &new_phase);
@@ -13696,7 +13731,7 @@ impl SplitContract {
     /// Generate a payment proof for a specific payer on an invoice (issue #85).
     /// No auth required — read-only. Returns total_paid = 0 if the payer has
     /// not contributed. The proof_hash is deterministic over
-    /// (invoice_id, payer, total_paid).
+    /// the XDR tuple (contract_address, invoice_id, payer, total_paid).
     pub fn generate_payment_proof(env: Env, invoice_id: u64, payer: Address) -> PaymentProof {
         let invoice = load_invoice(&env, invoice_id);
 
@@ -13707,13 +13742,7 @@ impl SplitContract {
             .map(|p| p.amount + p.tip)
             .sum();
 
-        // Preimage: 8 bytes invoice_id || 16 bytes total_paid (big-endian i128)
-        let mut preimage = [0u8; 24];
-        preimage[..8].copy_from_slice(&invoice_id.to_be_bytes());
-        preimage[8..24].copy_from_slice(&total_paid.to_be_bytes());
-
-        let bytes = Bytes::from_array(&env, &preimage);
-        let proof_hash: BytesN<32> = env.crypto().sha256(&bytes).into();
+        let proof_hash = payment_proof_hash(&env, invoice_id, &payer, total_paid);
 
         PaymentProof {
             invoice_id,
@@ -13751,16 +13780,9 @@ impl SplitContract {
             .map(|p| p.amount + p.tip)
             .sum();
 
-        // Recompute the hash using the current total
-        let mut preimage = [0u8; 24];
-        preimage[..8].copy_from_slice(&proof.invoice_id.to_be_bytes());
-        preimage[8..24].copy_from_slice(&current_total.to_be_bytes());
-
-        let bytes = Bytes::from_array(&env, &preimage);
-        let recomputed_hash: BytesN<32> = env.crypto().sha256(&bytes).into();
-
-        // Compare with the proof's hash
-        recomputed_hash == proof.proof_hash
+        proof.total_paid == current_total
+            && payment_proof_hash(&env, proof.invoice_id, &proof.payer, current_total)
+                == proof.proof_hash
     }
 
     /// Return all invoice IDs that include `recipient` as a recipient (issue #40).
